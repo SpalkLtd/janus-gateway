@@ -116,9 +116,11 @@ general: {
 	#events = false					# Whether events should be sent to event
 									# handlers (default=true)
 
-	# By default, integers are used as a unique ID for both mountpoints. In case
-	# you want to use strings instead (e.g., a UUID), set string_ids to true.
-	#string_ids = true
+        # By default, integers are used as a unique ID for both mountpoints. In case
+        # you want to use strings instead (e.g., a UUID), set string_ids to true.
+        #string_ids = true
+        #fixed_rtp_start = false                 # Start RTP sequence number and timestamp at 10 and 100
+                                                # for every new WebRTC connection (default=false)
 }
 
 #

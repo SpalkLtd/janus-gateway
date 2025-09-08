@@ -1206,6 +1206,7 @@ static janus_mutex config_mutex = JANUS_MUTEX_INITIALIZER;
 static volatile gint initialized = 0, stopping = 0;
 static gboolean notify_events = TRUE;
 static gboolean string_ids = FALSE;
+static gboolean fixed_rtp_start = FALSE;
 static janus_callbacks *gateway = NULL;
 static GThread *handler_thread;
 static void *janus_streaming_handler(void *data);
@@ -1956,14 +1957,17 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 		if(!notify_events && callback->events_is_enabled()) {
 			JANUS_LOG(LOG_WARN, "Notification of events to handlers disabled for %s\n", JANUS_STREAMING_NAME);
 		}
-		janus_config_item *ids = janus_config_get(config, config_general, janus_config_type_item, "string_ids");
-		if(ids != NULL && ids->value != NULL)
-			string_ids = janus_is_true(ids->value);
-		if(string_ids) {
-			JANUS_LOG(LOG_INFO, "Streaming will use alphanumeric IDs, not numeric\n");
-		}
-	}
-	/* Iterate on all mountpoints */
+                janus_config_item *ids = janus_config_get(config, config_general, janus_config_type_item, "string_ids");
+                if(ids != NULL && ids->value != NULL)
+                        string_ids = janus_is_true(ids->value);
+                if(string_ids) {
+                        JANUS_LOG(LOG_INFO, "Streaming will use alphanumeric IDs, not numeric\n");
+                }
+                janus_config_item *fixed_start = janus_config_get(config, config_general, janus_config_type_item, "fixed_rtp_start");
+                if(fixed_start && fixed_start->value)
+                        fixed_rtp_start = janus_is_true(fixed_start->value);
+        }
+        /* Iterate on all mountpoints */
 	mountpoints = g_hash_table_new_full(string_ids ? g_str_hash : g_int64_hash, string_ids ? g_str_equal : g_int64_equal,
 		(GDestroyNotify)g_free, (GDestroyNotify)janus_streaming_mountpoint_destroy);
 	mountpoints_temp = g_hash_table_new_full(string_ids ? g_str_hash : g_int64_hash, string_ids ? g_str_equal : g_int64_equal,
@@ -5866,11 +5870,15 @@ static void *janus_streaming_handler(void *data) {
 				janus_streaming_session_stream *s = g_malloc0(sizeof(janus_streaming_session_stream));
 				s->mindex = -1;
 				s->send = TRUE;
-				s->pt = -1;
-				janus_rtp_switching_context_reset(&s->context);
-				s->min_delay = -1;
-				s->max_delay = -1;
-				session->streams = g_list_append(session->streams, s);
+                                s->pt = -1;
+                                janus_rtp_switching_context_reset(&s->context);
+                                if(fixed_rtp_start) {
+                                        s->context.last_seq = s->context.prev_seq = 9;
+                                        s->context.last_ts = s->context.prev_ts = 100;
+                                }
+                                s->min_delay = -1;
+                                s->max_delay = -1;
+                                session->streams = g_list_append(session->streams, s);
 				if(session->streams_byid == NULL)
 					session->streams_byid = g_hash_table_new(NULL, NULL);
 				g_hash_table_insert(session->streams_byid, GINT_TO_POINTER(s->mindex), s);
@@ -6002,16 +6010,20 @@ static void *janus_streaming_handler(void *data) {
 								s->target_spatial_layer, s->spatial_layer);
 						}
 						json_t *temporal = json_object_get(root, "temporal_layer");
-						if(temporal) {
-							s->target_temporal_layer = json_integer_value(temporal);
-							JANUS_LOG(LOG_VERB, "Setting video temporal layer to let through (SVC): %d (was %d)\n",
-								s->target_temporal_layer, s->temporal_layer);
-						}
-					}
-					s->mindex = g_list_length(session->streams);
-					s->stream = stream;
-					janus_refcount_increase(&stream->ref);
-					session->streams = g_list_append(session->streams, s);
+                                                if(temporal) {
+                                                        s->target_temporal_layer = json_integer_value(temporal);
+                                                        JANUS_LOG(LOG_VERB, "Setting video temporal layer to let through (SVC): %d (was %d)\n",
+                                                                s->target_temporal_layer, s->temporal_layer);
+                                                }
+                                        }
+                                        if(fixed_rtp_start) {
+                                                s->context.last_seq = s->context.prev_seq = 9;
+                                                s->context.last_ts = s->context.prev_ts = 100;
+                                        }
+                                        s->mindex = g_list_length(session->streams);
+                                        s->stream = stream;
+                                        janus_refcount_increase(&stream->ref);
+                                        session->streams = g_list_append(session->streams, s);
 					if(session->streams_byid == NULL)
 						session->streams_byid = g_hash_table_new(NULL, NULL);
 					g_hash_table_insert(session->streams_byid, GINT_TO_POINTER(stream->mindex), s);
