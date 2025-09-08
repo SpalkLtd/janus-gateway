@@ -1206,6 +1206,9 @@ static janus_mutex config_mutex = JANUS_MUTEX_INITIALIZER;
 static volatile gint initialized = 0, stopping = 0;
 static gboolean notify_events = TRUE;
 static gboolean string_ids = FALSE;
+/* Custom RTP sequence number and timestamp start values */
+static uint16_t rtp_start_seq = 0;
+static uint32_t rtp_start_ts = 0;
 static janus_callbacks *gateway = NULL;
 static GThread *handler_thread;
 static void *janus_streaming_handler(void *data);
@@ -1956,13 +1959,29 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 		if(!notify_events && callback->events_is_enabled()) {
 			JANUS_LOG(LOG_WARN, "Notification of events to handlers disabled for %s\n", JANUS_STREAMING_NAME);
 		}
-		janus_config_item *ids = janus_config_get(config, config_general, janus_config_type_item, "string_ids");
-		if(ids != NULL && ids->value != NULL)
-			string_ids = janus_is_true(ids->value);
-		if(string_ids) {
-			JANUS_LOG(LOG_INFO, "Streaming will use alphanumeric IDs, not numeric\n");
-		}
-	}
+                janus_config_item *ids = janus_config_get(config, config_general, janus_config_type_item, "string_ids");
+                if(ids != NULL && ids->value != NULL)
+                        string_ids = janus_is_true(ids->value);
+                if(string_ids) {
+                        JANUS_LOG(LOG_INFO, "Streaming will use alphanumeric IDs, not numeric\n");
+                }
+                janus_config_item *start_seq = janus_config_get(config, config_general, janus_config_type_item, "start_seq");
+                if(start_seq && start_seq->value) {
+                        uint16_t tmp = 0;
+                        if(janus_string_to_uint16(start_seq->value, &tmp) < 0)
+                                JANUS_LOG(LOG_WARN, "Invalid start_seq value: %s\n", start_seq->value);
+                        else
+                                rtp_start_seq = tmp;
+                }
+                janus_config_item *start_ts = janus_config_get(config, config_general, janus_config_type_item, "start_ts");
+                if(start_ts && start_ts->value) {
+                        uint32_t tmp = 0;
+                        if(janus_string_to_uint32(start_ts->value, &tmp) < 0)
+                                JANUS_LOG(LOG_WARN, "Invalid start_ts value: %s\n", start_ts->value);
+                        else
+                                rtp_start_ts = tmp;
+                }
+        }
 	/* Iterate on all mountpoints */
 	mountpoints = g_hash_table_new_full(string_ids ? g_str_hash : g_int64_hash, string_ids ? g_str_equal : g_int64_equal,
 		(GDestroyNotify)g_free, (GDestroyNotify)janus_streaming_mountpoint_destroy);
@@ -5866,15 +5885,23 @@ static void *janus_streaming_handler(void *data) {
 				janus_streaming_session_stream *s = g_malloc0(sizeof(janus_streaming_session_stream));
 				s->mindex = -1;
 				s->send = TRUE;
-				s->pt = -1;
-				janus_rtp_switching_context_reset(&s->context);
-				s->min_delay = -1;
-				s->max_delay = -1;
-				session->streams = g_list_append(session->streams, s);
-				if(session->streams_byid == NULL)
-					session->streams_byid = g_hash_table_new(NULL, NULL);
-				g_hash_table_insert(session->streams_byid, GINT_TO_POINTER(s->mindex), s);
-			}
+                               s->pt = -1;
+                               janus_rtp_switching_context_reset(&s->context);
+                               if(rtp_start_seq > 0) {
+                                       s->context.last_seq = rtp_start_seq - 1;
+                                       s->context.seq_reset = TRUE;
+                               }
+                               if(rtp_start_ts > 0) {
+                                       s->context.last_ts = rtp_start_ts;
+                                       s->context.ts_reset = TRUE;
+                               }
+                               s->min_delay = -1;
+                               s->max_delay = -1;
+                               session->streams = g_list_append(session->streams, s);
+                               if(session->streams_byid == NULL)
+                                       session->streams_byid = g_hash_table_new(NULL, NULL);
+                               g_hash_table_insert(session->streams_byid, GINT_TO_POINTER(s->mindex), s);
+                       }
 			if(mp->streaming_type == janus_streaming_type_on_demand) {
 				/* Spawn a thread */
 				GError *error = NULL;
@@ -5977,7 +6004,7 @@ static void *janus_streaming_handler(void *data) {
 								s->sim_context.drop_trigger ? s->sim_context.drop_trigger : 250000);
 							s->sim_context.drop_trigger = json_integer_value(fallback);
 						}
-					} else if(stream && stream->svc) {
+                                        } else if(stream && stream->svc) {
 						JANUS_VALIDATE_JSON_OBJECT(root, svc_parameters,
 							error_code, error_cause, TRUE,
 							JANUS_STREAMING_ERROR_MISSING_ELEMENT, JANUS_STREAMING_ERROR_INVALID_ELEMENT);
@@ -6003,15 +6030,23 @@ static void *janus_streaming_handler(void *data) {
 						}
 						json_t *temporal = json_object_get(root, "temporal_layer");
 						if(temporal) {
-							s->target_temporal_layer = json_integer_value(temporal);
-							JANUS_LOG(LOG_VERB, "Setting video temporal layer to let through (SVC): %d (was %d)\n",
-								s->target_temporal_layer, s->temporal_layer);
-						}
-					}
-					s->mindex = g_list_length(session->streams);
-					s->stream = stream;
-					janus_refcount_increase(&stream->ref);
-					session->streams = g_list_append(session->streams, s);
+                                                s->target_temporal_layer = json_integer_value(temporal);
+                                                JANUS_LOG(LOG_VERB, "Setting video temporal layer to let through (SVC): %d (was %d)\n",
+                                                        s->target_temporal_layer, s->temporal_layer);
+                                                }
+                                        }
+                                        if(rtp_start_seq > 0) {
+                                                s->context.last_seq = rtp_start_seq - 1;
+                                                s->context.seq_reset = TRUE;
+                                        }
+                                        if(rtp_start_ts > 0) {
+                                                s->context.last_ts = rtp_start_ts;
+                                                s->context.ts_reset = TRUE;
+                                        }
+                                        s->mindex = g_list_length(session->streams);
+                                        s->stream = stream;
+                                        janus_refcount_increase(&stream->ref);
+                                        session->streams = g_list_append(session->streams, s);
 					if(session->streams_byid == NULL)
 						session->streams_byid = g_hash_table_new(NULL, NULL);
 					g_hash_table_insert(session->streams_byid, GINT_TO_POINTER(stream->mindex), s);

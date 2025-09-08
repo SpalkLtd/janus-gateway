@@ -116,9 +116,12 @@ general: {
 	#events = false					# Whether events should be sent to event
 									# handlers (default=true)
 
-	# By default, integers are used as a unique ID for both mountpoints. In case
-	# you want to use strings instead (e.g., a UUID), set string_ids to true.
-	#string_ids = true
+        # By default, integers are used as a unique ID for both mountpoints. In case
+        # you want to use strings instead (e.g., a UUID), set string_ids to true.
+        #string_ids = true
+
+        #start_seq = 10                     # If set, RTP sequence numbers for new sessions start at this value
+        #start_ts = 100                     # If set, RTP timestamps for new sessions start at this value
 }
 
 #
