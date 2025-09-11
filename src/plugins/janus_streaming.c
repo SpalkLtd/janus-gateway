@@ -1563,7 +1563,13 @@ static void janus_streaming_session_free(const janus_refcount *session_ref) {
 }
 
 static void janus_streaming_sync_rtp_context(janus_streaming_session *session, janus_streaming_mountpoint *mp) {
-	if(session == NULL || mp == NULL || !mp->rtp_sync || mp->viewers == NULL || mp->streaming_source != janus_streaming_source_rtp) {
+	if (session == NULL || mp == NULL || mp->viewers == NULL || mp->streaming_source != janus_streaming_source_rtp) {
+		return;
+	}
+
+	// Check if RTP sync is enabled
+	janus_streaming_rtp_source *source = mp->source;
+	if(!source->rtp_sync) {
 		return;
 	}
 
@@ -1573,7 +1579,7 @@ static void janus_streaming_sync_rtp_context(janus_streaming_session *session, j
 		return;
 	}
 
-	// Sync all other the context with the first viewer
+	// Sync the context for all other viewers with the first viewer
 	janus_mutex_lock(&first->mutex);
 	GHashTableIter iter;
 	gpointer key, val;
