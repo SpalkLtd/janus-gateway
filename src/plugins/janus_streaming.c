@@ -115,6 +115,7 @@ h264sps = if using H.264 as a video codec, value of the sprop-parameter-sets
 collision = in case of collision (more than one SSRC hitting the same port), the plugin
 	will discard incoming RTP packets with a new SSRC unless this many milliseconds
 	passed, which would then change the current SSRC (0=disabled)
+rtp_sync = true|false (whether new viewers inherit current RTP sequence number and timestamp)
 dataport = local port for receiving data messages to relay
 datamcast = multicast group for receiving data messages, if any
 dataiface = network interface or IP address to bind to, if any (binds to all otherwise)
@@ -1120,7 +1121,8 @@ static struct janus_json_parameter rtp_parameters[] = {
 	{"srtpcrypto", JSON_STRING, 0},
 	{"e2ee", JANUS_JSON_BOOL, 0},
 	{"playoutdelay_ext", JANUS_JSON_BOOL, 0},
-	{"abscapturetime_src_ext_id", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE}
+	{"abscapturetime_src_ext_id", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
+	{"rtp_sync", JANUS_JSON_BOOL, 0}
 };
 static struct janus_json_parameter live_parameters[] = {
 	{"filename", JSON_STRING, JANUS_JSON_PARAM_REQUIRED},
@@ -1389,6 +1391,7 @@ typedef struct janus_streaming_rtp_source {
 	janus_mutex rec_mutex;		/* Mutex to protect the recorders of all media streams from race conditions */
 	int pipefd[2];				/* Just needed to quickly interrupt the poll when it's time to wrap up */
 	int rtp_collision;			/* Whether we should take care of potential RTP collisions */
+	gboolean rtp_sync;			/* Whether new viewers should inherit RTP seq/timestamp */
 	uint32_t lowest_bitrate;	/* Lowest bitrate received by viewers via REMB since last update */
 	gint64 remb_latest;			/* Time of latest sent REMB (to avoid flooding) */
 	gboolean rtsp;
@@ -1577,7 +1580,7 @@ janus_streaming_rtp_source_stream *janus_streaming_create_rtp_source_stream(
 		gboolean textdata, gboolean buffermsg);
 janus_streaming_mountpoint *janus_streaming_create_rtp_source(
 		uint64_t id, char *id_str, char *name, char *desc, char *metadata,
-		GList *media, int srtpsuite, char *srtpcrypto, int threads, int rtp_collision,
+		GList *media, int srtpsuite, char *srtpcrypto, int threads, int rtp_collision, gboolean rtp_sync,
 		uint16_t bufferkf_ms, uint32_t bufferkf_bytes,
 		gboolean e2ee, gboolean playoutdelay_ext, int abscapturetime_src_ext_id);
 /* Helper to create a file/ondemand live source */
@@ -1665,6 +1668,38 @@ static void janus_streaming_session_free(const janus_refcount *session_ref) {
 	/* This session can be destroyed, free all the resources */
 	janus_mutex_destroy(&session->mutex);
 	g_free(session);
+}
+
+static void janus_streaming_sync_rtp_context(janus_streaming_session *session, janus_streaming_mountpoint *mp) {
+	if (session == NULL || mp == NULL || mp->viewers == NULL || mp->streaming_source != janus_streaming_source_rtp) {
+		return;
+	}
+
+	// Check if RTP sync is enabled
+	janus_streaming_rtp_source *source = mp->source;
+	if(!source->rtp_sync) {
+		return;
+	}
+
+	// Ignore the first viewer, it's the reference
+	janus_streaming_session *first = (janus_streaming_session *)mp->viewers->data;
+	if(first == NULL || first == session) {
+		return;
+	}
+
+	// Sync the context for all other viewers with the first viewer
+	janus_mutex_lock(&first->mutex);
+	GHashTableIter iter;
+	gpointer key, val;
+	g_hash_table_iter_init(&iter, first->streams_byid);
+	while(g_hash_table_iter_next(&iter, &key, &val)) {
+		janus_streaming_session_stream *sa = g_hash_table_lookup(session->streams_byid, key);
+		janus_streaming_session_stream *sb = val;
+		if(sa) {
+			sa->context = sb->context;
+		}
+	}
+	janus_mutex_unlock(&first->mutex);
 }
 
 static void janus_streaming_mountpoint_destroy(janus_streaming_mountpoint *mountpoint) {
@@ -2229,6 +2264,7 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 				janus_config_item *pin = janus_config_get(config, cat, janus_config_type_item, "pin");
 				janus_config_item *media = janus_config_get(config, cat, janus_config_type_array, "media");
 				janus_config_item *rtpcollision = janus_config_get(config, cat, janus_config_type_item, "collision");
+				janus_config_item *rtpsync = janus_config_get(config, cat, janus_config_type_item, "rtp_sync");
 				janus_config_item *vkf_ms = janus_config_get(config, cat, janus_config_type_item, "bufferkf_ms");
 				janus_config_item *vkf_bytes = janus_config_get(config, cat, janus_config_type_item, "bufferkf_bytes");
 				janus_config_item *threads = janus_config_get(config, cat, janus_config_type_item, "threads");
@@ -2680,6 +2716,7 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 						scrypto && scrypto->value ? (char *)scrypto->value : NULL,
 						(threads && threads->value) ? atoi(threads->value) : 0,
 						(rtpcollision && rtpcollision->value) ?  atoi(rtpcollision->value) : 0,
+						(rtpsync && rtpsync->value) ? janus_is_true(rtpsync->value) : FALSE,
 						bufferkf_ms, bufferkf_bytes,
 						(e2ee && e2ee->value) ? janus_is_true(e2ee->value) : FALSE,
 						(pd && pd->value) ? janus_is_true(pd->value) : FALSE,
@@ -3434,6 +3471,8 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 			}
 			if(source->rtp_collision > 0)
 				json_object_set_new(ml, "collision", json_integer(source->rtp_collision));
+			if(source->rtp_sync)
+				json_object_set_new(ml, "rtp_sync", json_true());
 			if(source->bufferkf_ms > 0) {
 				json_object_set_new(ml, "bufferkf_ms", json_integer(source->bufferkf_ms));
 			}
@@ -3621,6 +3660,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 			json_t *md = json_object_get(root, "metadata");
 			json_t *is_private = json_object_get(root, "is_private");
 			json_t *rtpcollision = json_object_get(root, "collision");
+			json_t *rtpsync = json_object_get(root, "rtp_sync");
 			json_t *vkf_ms = json_object_get(root, "bufferkf_ms");
 			json_t *vkf_bytes = json_object_get(root, "bufferkf_bytes");
 			json_t *threads = json_object_get(root, "threads");
@@ -4105,6 +4145,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 					scrypto ? (char *)json_string_value(scrypto) : NULL,
 					threads ? json_integer_value(threads) : 0,
 					rtpcollision ? json_integer_value(rtpcollision) : 0,
+					rtpsync ? json_is_true(rtpsync) : FALSE,
 					bufferkf_ms, bufferkf_bytes,
 					e2ee ? json_is_true(e2ee) : FALSE,
 					pd ? json_is_true(pd) : FALSE,
@@ -4515,6 +4556,8 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 					g_snprintf(value, BUFSIZ, "%d", source->rtp_collision);
 					janus_config_add(config, c, janus_config_item_create("collision", value));
 				}
+				if(source->rtp_sync)
+					janus_config_add(config, c, janus_config_item_create("rtp_sync", "true"));
 				if(source->bufferkf_ms > 0) {
 					g_snprintf(value, BUFSIZ, "%"SCNu16, source->bufferkf_ms);
 					janus_config_add(config, c, janus_config_item_create("bufferkf_ms", value));
@@ -4885,6 +4928,8 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 					g_snprintf(value, BUFSIZ, "%d", source->rtp_collision);
 					janus_config_add(config, c, janus_config_item_create("collision", value));
 				}
+				if(source->rtp_sync)
+					janus_config_add(config, c, janus_config_item_create("rtp_sync", "true"));
 				if(source->bufferkf_ms > 0) {
 					g_snprintf(value, BUFSIZ, "%"SCNu16, source->bufferkf_ms);
 					janus_config_add(config, c, janus_config_item_create("bufferkf_ms", value));
@@ -6611,6 +6656,7 @@ done:
 			json_object_set_new(result, "status", json_string(do_restart ? "updating" : "preparing"));
 			/* Add the user to the list of watchers and we're done */
 			if(g_list_find(mp->viewers, session) == NULL) {
+				janus_streaming_sync_rtp_context(session, mp);
 				mp->viewers = g_list_append(mp->viewers, session);
 				if(mp->streaming_source == janus_streaming_source_rtp) {
 					/* If we're using helper threads, add the viewer to one of those */
@@ -7361,6 +7407,7 @@ done:
 			janus_mutex_lock(&mp->mutex);
 			janus_mutex_lock(&session->mutex);
 			janus_refcount_increase(&mp->ref);
+			janus_streaming_sync_rtp_context(session, mp);
 			mp->viewers = g_list_append(mp->viewers, session);
 			/* If we're using helper threads, add the viewer to one of those */
 			if(mp->helper_threads > 0) {
@@ -7974,7 +8021,7 @@ janus_streaming_rtp_source_stream *janus_streaming_create_rtp_source_stream(
 
 janus_streaming_mountpoint *janus_streaming_create_rtp_source(
 		uint64_t id, char *id_str, char *name, char *desc, char *metadata,
-		GList *media, int srtpsuite, char *srtpcrypto, int threads, int rtp_collision,
+		GList *media, int srtpsuite, char *srtpcrypto, int threads, int rtp_collision, gboolean rtp_sync,
 		uint16_t bufferkf_ms, uint32_t bufferkf_bytes,
 		gboolean e2ee, gboolean playoutdelay_ext, int abscapturetime_src_ext_id) {
 	char id_num[30];
@@ -8096,6 +8143,7 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
 	pipe(live_rtp_source->pipefd);
 	janus_mutex_init(&live_rtp_source->rec_mutex);
 	live_rtp_source->rtp_collision = rtp_collision;
+	live_rtp_source->rtp_sync = rtp_sync;
 	live_rtp_source->bufferkf_ms = bufferkf_ms;
 	live_rtp_source->bufferkf_bytes = bufferkf_bytes;
 	live_rtp_source->e2ee = e2ee;
