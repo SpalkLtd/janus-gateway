@@ -3082,6 +3082,9 @@ static void janus_ice_cb_nice_recv(NiceAgent *agent, guint stream_id, guint comp
 				if(nacks_count && medium->do_nacks) {
 					/* Handle NACK */
 					JANUS_LOG(LOG_HUGE, "[%"SCNu64"]     Just got some NACKS (%d) we should handle...\n", handle->handle_id, nacks_count);
+					JANUS_LOG(LOG_HUGE, "[%"SCNu64"]     NACK Debug: retransmit_seqs=%p, retransmit_buffer=%p, do_nacks=%d, nack_queue_ms=%d\n",
+						handle->handle_id, medium->retransmit_seqs, medium->retransmit_buffer, 
+						medium->do_nacks, medium->nack_queue_ms);
 					GHashTable *retransmit_seqs = medium->retransmit_seqs;
 					GSList *list = (retransmit_seqs != NULL ? nacks : NULL);
 					int retransmits_cnt = 0;
@@ -4571,6 +4574,10 @@ static gboolean janus_ice_outgoing_traffic_handle(janus_ice_handle *handle, janu
 	if(pkt->control) {
 		/* RTCP */
 		int video = (pkt->type == JANUS_ICE_PACKET_VIDEO);
+		if(video) {
+			JANUS_LOG(LOG_HUGE, "[%"SCNu64"] Sending video packet, retransmission=%d, nack_queue_ms=%d, do_nacks=%d\n",
+				handle->handle_id, pkt->retransmission, medium->nack_queue_ms, medium->do_nacks);
+		}
 		pc->noerrorlog = FALSE;
 		if(janus_is_webrtc_encryption_enabled() && (!pc->dtls || !pc->dtls->srtp_valid || !pc->dtls->srtp_out)) {
 			if(!janus_flags_is_set(&handle->webrtc_flags, JANUS_ICE_HANDLE_WEBRTC_ALERT) && !pc->noerrorlog) {
@@ -4812,9 +4819,13 @@ static gboolean janus_ice_outgoing_traffic_handle(janus_ice_handle *handle, janu
 							}
 						}
 					}
+					
+					JANUS_LOG(LOG_HUGE, "[%"SCNu64"] Checking if should save for retransmit: video=%d, nack_queue_ms=%d, retransmission=%d, encrypted=%d\n",
+    					handle->handle_id, video, medium->nack_queue_ms, pkt->retransmission, pkt->encrypted);
 					if(medium->nack_queue_ms > 0 && !pkt->retransmission) {
 						/* Save the packet for retransmissions that may be needed later */
 						if(!medium->do_nacks) {
+							JANUS_LOG(LOG_WARN, "[%"SCNu64"] NACKS disabled for this medium, not saving packet\n", handle->handle_id);
 							/* ... unless NACKs are disabled for this medium */
 							janus_ice_free_queued_packet(pkt);
 							return G_SOURCE_CONTINUE;
@@ -4835,6 +4846,8 @@ static gboolean janus_ice_outgoing_traffic_handle(janus_ice_handle *handle, janu
 							medium->retransmit_buffer = g_queue_new();
 							medium->retransmit_seqs = g_hash_table_new(NULL, NULL);
 						}
+						JANUS_LOG(LOG_WARN, "[%"SCNu64"] Retransmit buffer INITIALIZED! retransmit_seqs=%p, seq=%u\n",
+							handle->handle_id, medium->retransmit_seqs, seq);
 						g_queue_push_tail(medium->retransmit_buffer, p);
 						/* Insert in the table too, for quick lookup */
 						g_hash_table_insert(medium->retransmit_seqs, GUINT_TO_POINTER(seq), p);
