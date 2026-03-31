@@ -1,4 +1,4 @@
-AC_INIT([Janus WebRTC Server],[1.1.2],[https://github.com/meetecho/janus-gateway],[janus-gateway],[https://janus.conf.meetecho.com])
+AC_INIT([Janus WebRTC Server],[1.4.0],[https://github.com/meetecho/janus-gateway],[janus-gateway],[https://janus.conf.meetecho.com])
 AC_LANG(C)
 AC_CONFIG_AUX_DIR([.])
 AC_CONFIG_MACRO_DIR([m4])
@@ -21,7 +21,6 @@ CFLAGS="$CFLAGS \
 	-fPIC \
 	-fstack-protector-all \
 	-fstrict-aliasing \
-	-ggdb3 \
 	-pthread \
 	-Wall \
 	-Warray-bounds \
@@ -30,7 +29,7 @@ CFLAGS="$CFLAGS \
 	-Wformat-security \
 	-Wformat=2 \
 	-Winit-self \
-	-Wlarger-than=65537 \
+	-Wlarger-than=2097152 \
 	-Wmissing-declarations \
 	-Wmissing-format-attribute \
 	-Wmissing-include-dirs \
@@ -53,8 +52,8 @@ case "$CC" in
 *clang*)
 	# Specific clang flags
 	CFLAGS="$CFLAGS \
-		-Wno-cast-align \
-		-Wno-initializer-overrides"
+		-Wno-initializer-overrides \
+		-Wno-missing-noreturn"
 ;;
 cc*)
 	CFLAGS="$CFLAGS \
@@ -64,17 +63,16 @@ cc*)
 *)
 	# Specific gcc flags
 	CFLAGS="$CFLAGS \
-		-Wcast-align \
 		-Wno-override-init \
 		-Wunsafe-loop-optimizations \
 		-Wunused-but-set-variable"
 esac
 
-JANUS_VERSION=1102
+JANUS_VERSION=1400
 AC_SUBST(JANUS_VERSION)
-JANUS_VERSION_STRING="1.1.2"
+JANUS_VERSION_STRING="1.4.0"
 AC_SUBST(JANUS_VERSION_STRING)
-JANUS_VERSION_SO="2:2:1"
+JANUS_VERSION_SO="2:9:0"
 AC_SUBST(JANUS_VERSION_SO)
 
 case "$host_os" in
@@ -100,6 +98,9 @@ esac
 glib_version=2.34
 ssl_version=1.0.1
 jansson_version=2.5
+
+JANUS_PACKAGES_PUBLIC="glib-2.0 >= $glib_version, jansson >= $jansson_version"
+AC_SUBST(JANUS_PACKAGES_PUBLIC)
 
 ##
 # Janus
@@ -185,8 +186,6 @@ AC_ARG_ENABLE([all-plugins],
                      [enable_plugin_videocall=no])
                AS_IF([test "x$enable_plugin_videoroom" != "xyes"],
                      [enable_plugin_videoroom=no])
-               AS_IF([test "x$enable_plugin_voicemail" != "xyes"],
-                     [enable_plugin_voicemail=no])
               ],
               [])
 
@@ -375,7 +374,7 @@ AS_IF([test "x${boringssl_dir}" != "x"],
 	   CFLAGS="$CFLAGS -I${boringssl_dir}/include";
 	   BORINGSSL_CFLAGS=" -I${boringssl_dir}/include";
        AC_SUBST(BORINGSSL_CFLAGS)
-	   BORINGSSL_LIBS=" -L${boringssl_dir}/lib";
+	   BORINGSSL_LIBS=" -L${boringssl_dir}/lib -lstdc++";
        AC_SUBST(BORINGSSL_LIBS)
 	   AC_CHECK_HEADERS([${boringssl_dir}/include/openssl/opensslconf.h],
 	                    [AC_DEFINE(HAVE_BORINGSSL)],
@@ -424,6 +423,12 @@ AC_CHECK_LIB([nice],
              [nice_agent_new_full],
              [AC_DEFINE(HAVE_ICE_NOMINATION)],
              [AC_MSG_NOTICE([libnice version does not have nice_agent_new_full])]
+             )
+
+AC_CHECK_LIB([nice],
+             [nice_agent_consent_lost],
+             [AC_DEFINE(HAVE_CONSENT_FRESHNESS)],
+             [AC_MSG_NOTICE([libnice version does not have nice_agent_consent_lost])]
              )
 
 AC_CHECK_LIB([dl],
@@ -546,13 +551,6 @@ PKG_CHECK_MODULES([MHD],
 AC_SUBST([MHD_CFLAGS])
 AC_SUBST([MHD_LIBS])
 AM_CONDITIONAL([ENABLE_REST], [test "x$enable_rest" = "xyes"])
-AM_COND_IF([ENABLE_REST],
-           [
-             AC_CHECK_TYPES([enum MHD_Result],
-                            [],
-                            [],
-                            [#include <microhttpd.h>])
-           ])
 
 AC_CHECK_LIB([websockets],
 			 [lws_create_vhost],
@@ -770,13 +768,6 @@ AC_ARG_ENABLE([plugin-videoroom],
                      [enable_plugin_videoroom=no])],
               [enable_plugin_videoroom=yes])
 
-AC_ARG_ENABLE([plugin-voicemail],
-              [AS_HELP_STRING([--disable-plugin-voicemail],
-                              [Disable voicemail plugin])],
-              [AS_IF([test "x$enable_plugin_voicemail" != "xyes"],
-                     [enable_plugin_voicemail=no])],
-              [enable_plugin_voicemail=maybe])
-
 PKG_CHECK_MODULES([SOFIA],
                   [sofia-sip-ua],
                   [
@@ -791,10 +782,19 @@ AC_SUBST([SOFIA_CFLAGS])
 AC_SUBST([SOFIA_LIBS])
 
 PKG_CHECK_MODULES([OPUS],
-                  [opus],
+                  [
+                   opus
+                  ],
                   [
                     AS_IF([test "x$enable_plugin_audiobridge" = "xmaybe"],
-                          [enable_plugin_audiobridge=yes])
+                          [
+                           enable_plugin_audiobridge=yes
+                          ])
+                    AS_IF([test "x$enable_plugin_audiobridge" = "xyes"],
+                          [
+                           AC_DEFINE(FLOATING_POINT)
+                           AC_DEFINE([EXPORT], [], [Symbol visibility prefix])
+                          ])
                   ],
                   [
                     AS_IF([test "x$enable_plugin_audiobridge" = "xyes"],
@@ -807,15 +807,21 @@ PKG_CHECK_MODULES([OGG],
                   [ogg],
                   [
                     AC_DEFINE(HAVE_LIBOGG)
-                    AS_IF([test "x$enable_plugin_voicemail" = "xmaybe"],
-                          [enable_plugin_voicemail=yes])
                   ],
                   [
-                    AS_IF([test "x$enable_plugin_voicemail" = "xyes"],
-                          [AC_MSG_ERROR([libogg not found. See README.md for installation instructions or use --disable-plugin-voicemail])])
                   ])
 AC_SUBST([OGG_CFLAGS])
 AC_SUBST([OGG_LIBS])
+
+PKG_CHECK_MODULES([RNNOISE],
+                  [rnnoise],
+                  [
+                    AC_DEFINE(HAVE_RNNOISE)
+                  ],
+                  [
+                  ])
+AC_SUBST([RNNOISE_CFLAGS])
+AC_SUBST([RNNOISE_LIBS])
 
 PKG_CHECK_MODULES([LUA],
                   [lua],
@@ -860,7 +866,6 @@ AM_CONDITIONAL([ENABLE_PLUGIN_NOSIP], [test "x$enable_plugin_nosip" = "xyes"])
 AM_CONDITIONAL([ENABLE_PLUGIN_STREAMING], [test "x$enable_plugin_streaming" = "xyes"])
 AM_CONDITIONAL([ENABLE_PLUGIN_VIDEOCALL], [test "x$enable_plugin_videocall" = "xyes"])
 AM_CONDITIONAL([ENABLE_PLUGIN_VIDEOROOM], [test "x$enable_plugin_videoroom" = "xyes"])
-AM_CONDITIONAL([ENABLE_PLUGIN_VOICEMAIL], [test "x$enable_plugin_voicemail" = "xyes"])
 AM_CONDITIONAL([ENABLE_PLUGIN_TEXTROOM], [test "x$enable_plugin_textroom" = "xyes"])
 
 
@@ -985,6 +990,7 @@ AC_CONFIG_FILES([
   src/Makefile
   html/Makefile
   docs/Makefile
+  janus-gateway.pc
 ])
 
 JANUS_MANUAL_LIBS+=" -pthread"
@@ -1065,9 +1071,6 @@ AM_COND_IF([ENABLE_PLUGIN_AUDIOBRIDGE],
 AM_COND_IF([ENABLE_PLUGIN_VIDEOROOM],
 	[echo "    Video Room:            yes"],
 	[echo "    Video Room:            no"])
-AM_COND_IF([ENABLE_PLUGIN_VOICEMAIL],
-	[echo "    Voice Mail:            yes"],
-	[echo "    Voice Mail:            no"])
 AM_COND_IF([ENABLE_PLUGIN_RECORDPLAY],
 	[echo "    Record&Play:           yes"],
 	[echo "    Record&Play:           no"])
