@@ -14,8 +14,20 @@
 #include "rtp.h"
 #include "rtpsrtp.h"
 #include "debug.h"
-#include "utils.h"
 
+/* Local, private, structures for parsing video-layers-allocation extensions */
+typedef struct janus_rtp_vla_spatial_layer {
+	uint8_t id;
+	uint8_t tls;
+} janus_rtp_vla_spatial_layer;
+
+typedef struct janus_rtp_vla_rtp_stream {
+	uint8_t rid;
+	uint8_t sl_bm;
+	janus_rtp_vla_spatial_layer sl[4];
+} janus_rtp_vla_rtp_stream;
+
+/* Public methods */
 gboolean janus_is_rtp(char *buf, guint len) {
 	if (len < 12)
 		return FALSE;
@@ -104,6 +116,8 @@ const char *janus_rtp_header_extension_get_from_id(const char *sdp, int id) {
 						return JANUS_RTP_EXTMAP_TOFFSET;
 					if(strstr(extension, JANUS_RTP_EXTMAP_ABS_SEND_TIME))
 						return JANUS_RTP_EXTMAP_ABS_SEND_TIME;
+					if(strstr(extension, JANUS_RTP_EXTMAP_ABS_CAPTURE_TIME))
+						return JANUS_RTP_EXTMAP_ABS_CAPTURE_TIME;
 					if(strstr(extension, JANUS_RTP_EXTMAP_TRANSPORT_WIDE_CC))
 						return JANUS_RTP_EXTMAP_TRANSPORT_WIDE_CC;
 					if(strstr(extension, JANUS_RTP_EXTMAP_MID))
@@ -114,6 +128,8 @@ const char *janus_rtp_header_extension_get_from_id(const char *sdp, int id) {
 						return JANUS_RTP_EXTMAP_REPAIRED_RID;
 					if(strstr(extension, JANUS_RTP_EXTMAP_DEPENDENCY_DESC))
 						return JANUS_RTP_EXTMAP_DEPENDENCY_DESC;
+					if(strstr(extension, JANUS_RTP_EXTMAP_VIDEO_LAYERS))
+						return JANUS_RTP_EXTMAP_VIDEO_LAYERS;
 					JANUS_LOG(LOG_ERR, "Unsupported extension '%s'\n", extension);
 					return NULL;
 				}
@@ -277,10 +293,10 @@ int janus_rtp_header_extension_parse_mid(char *buf, int len, int id,
 	if(ext == NULL || idlen < 1)
 		return -2;
 	if(idlen > (sdes_len-1)) {
-		JANUS_LOG(LOG_WARN, "SDES buffer is too small (%d > %d), MID will be cut\n", idlen, sdes_len);
+		JANUS_LOG(LOG_WARN, "Buffer is too small (%d > %d), MID will be cut\n", idlen, sdes_len);
 		idlen = sdes_len-1;
 	}
-	if(idlen > len-(ext-buf)-1 ) {
+	if(idlen > len-(ext-buf)-1) {
 		return -3;
 	}
 	memcpy(sdes_item, ext, idlen);
@@ -299,10 +315,10 @@ int janus_rtp_header_extension_parse_rid(char *buf, int len, int id,
 	if(ext == NULL || idlen < 1)
 		return -2;
 	if(idlen > (sdes_len-1)) {
-		JANUS_LOG(LOG_WARN, "SDES buffer is too small (%d > %d), RTP stream ID will be cut\n", idlen, sdes_len);
+		JANUS_LOG(LOG_WARN, "Buffer is too small (%d > %d), RTP stream ID will be cut\n", idlen, sdes_len);
 		idlen = sdes_len-1;
 	}
-	if(idlen > len-(ext-buf)-1 ) {
+	if(idlen > len-(ext-buf)-1) {
 		return -3;
 	}
 	memcpy(sdes_item, ext, idlen);
@@ -322,10 +338,10 @@ int janus_rtp_header_extension_parse_dependency_desc(char *buf, int len, int id,
 	if(ext == NULL || idlen < 1)
 		return -2;
 	if(idlen > buflen) {
-		JANUS_LOG(LOG_WARN, "SDES buffer is too small (%d > %d), dependency descriptor will be cut\n", idlen, buflen);
+		JANUS_LOG(LOG_WARN, "Buffer is too small (%d > %d), dependency descriptor will be cut\n", idlen, buflen);
 		idlen = buflen;
 	}
-	if(idlen > len-(ext-buf)-1 ) {
+	if(idlen > len-(ext-buf)-1) {
 		return -3;
 	}
 	memcpy(dd_item, ext, idlen);
@@ -333,7 +349,7 @@ int janus_rtp_header_extension_parse_dependency_desc(char *buf, int len, int id,
 	return 0;
 }
 
-int janus_rtp_header_extension_parse_abs_sent_time(char *buf, int len, int id, uint32_t *abs_ts) {
+int janus_rtp_header_extension_parse_abs_send_time(char *buf, int len, int id, uint32_t *abs_ts) {
 	char *ext = NULL;
 	uint8_t idlen = 0;
 	if(janus_rtp_header_extension_find(buf, len, id, NULL, NULL, &ext, &idlen) < 0)
@@ -361,6 +377,37 @@ int janus_rtp_header_extension_set_abs_send_time(char *buf, int len, int id, uin
 		return -3;
 	uint32_t abs24 = htonl(abs_ts) >> 8;
 	memcpy(ext, &abs24, 3);
+	return 0;
+}
+
+int janus_rtp_header_extension_parse_abs_capture_time(char *buf, int len, int id, uint64_t *abs_ts) {
+	char *ext = NULL;
+	uint8_t idlen = 0;
+	if(janus_rtp_header_extension_find(buf, len, id, NULL, NULL, &ext, &idlen) < 0)
+		return -1;
+	/* a=extmap:7 http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time */
+	if(ext == NULL)
+		return -2;
+	if(idlen < 8 || idlen > len-(ext-buf)-1)
+		return -3;
+	uint64_t abs64 = 0;
+	memcpy(&abs64, ext, 8);
+	if(abs_ts)
+		*abs_ts = ntohll(abs64);
+	return 0;
+}
+
+int janus_rtp_header_extension_set_abs_capture_time(char *buf, int len, int id, uint64_t abs_ts) {
+	char *ext = NULL;
+	uint8_t idlen = 0;
+	if(janus_rtp_header_extension_find(buf, len, id, NULL, NULL, &ext, &idlen) < 0)
+		return -1;
+	if(ext == NULL)
+		return -2;
+	if(idlen < 8 || idlen > len-(ext-buf)-1)
+		return -3;
+	uint64_t abs64 = htonll(abs_ts);
+	memcpy(ext, &abs64, 8);
 	return 0;
 }
 
@@ -395,6 +442,73 @@ int janus_rtp_header_extension_set_transport_wide_cc(char *buf, int len, int id,
 		return -3;
 	transSeqNum = htons(transSeqNum);
 	memcpy(ext, &transSeqNum, sizeof(uint16_t));
+	return 0;
+}
+
+int janus_rtp_header_extension_parse_video_layers_allocation(char *buf, int len, int id,
+		int8_t *spatial_layers, int8_t *temporal_layers) {
+	char *ext = NULL;
+	uint8_t idlen = 0;
+	if(janus_rtp_header_extension_find(buf, len, id, NULL, NULL, &ext, &idlen) < 0)
+		return -1;
+	/* a=extmap:9 http://www.webrtc.org/experiments/rtp-hdrext/video-layers-allocation00 */
+	if(ext == NULL || idlen < 2)
+		return -2;
+	/* Parse the extension to reconstruct the layers topology */
+	janus_rtp_vla_rtp_stream streams[4] = { 0 };
+	/* First byte */
+	uint8_t offset = 0;
+	uint8_t ns = (ext[offset] & 0x30) >> 4;
+	uint8_t sl_bm = ext[offset] & 0x0F;
+	offset++;
+	/* Spatial layer bitmasks (up to two bytes) */
+	uint8_t i = 0;
+	for(i=0; i<=ns; i++) {
+		if(sl_bm > 0) {
+			/* Copy the shared value */
+			streams[i].sl_bm = sl_bm;
+		} else {
+			if(i == 2) {
+				offset++;
+				if(offset == idlen)
+					return -3;
+			}
+			if(i % 2 == 0) {
+				streams[i].sl_bm = (ext[offset] & 0xF0) >> 4;
+			} else {
+				streams[i].sl_bm = ext[offset] & 0x0F;
+			}
+		}
+	}
+	if(sl_bm == 0)
+		offset++;
+	if(offset == idlen)
+		return -3;
+	/* Temporal layers (one byte) */
+	uint8_t j = 0, boff = 8, sl = 0, tl = 0;
+	for(i=0; i<=ns; i++) {
+		sl = 0;
+		for(j=0; j<4; j++) {
+			if((streams[i].sl_bm & (1 << j)) == 0)
+				continue;
+			sl++;
+			boff -= 2;
+			streams[i].sl[j].id = j;
+			streams[i].sl[j].tls = (ext[offset] >> boff) & 0x03;
+			tl = streams[i].sl[j].tls + 1;
+			if(temporal_layers && tl > *temporal_layers)
+				*temporal_layers = tl;
+			if(boff == 0) {
+				boff = 8;
+				offset++;
+				if(offset == idlen)
+					return -3;
+			}
+		}
+		if(spatial_layers && sl > *spatial_layers)
+			*spatial_layers = sl;
+	}
+	/* Done, we don't care about bitrates and resolutions for now */
 	return 0;
 }
 
@@ -472,6 +586,8 @@ int janus_rtp_extension_id(const char *type) {
 		return 14;
 	else if(!strcasecmp(type, JANUS_RTP_EXTMAP_ABS_SEND_TIME))
 		return 2;
+	else if(!strcasecmp(type, JANUS_RTP_EXTMAP_ABS_CAPTURE_TIME))
+		return 7;
 	else if(!strcasecmp(type, JANUS_RTP_EXTMAP_VIDEO_ORIENTATION))
 		return 13;
 	else if(!strcasecmp(type, JANUS_RTP_EXTMAP_TRANSPORT_WIDE_CC))
@@ -746,8 +862,8 @@ void janus_rtp_header_update(janus_rtp_header *header, janus_rtp_switching_conte
 		context->new_ssrc = TRUE;
 	}
 	if(context->ts_reset) {
-		/* Video timestamp was paused for a while */
-		JANUS_LOG(LOG_HUGE, "Video RTP timestamp reset requested");
+		/* RTP timestamp was paused for a while */
+		JANUS_LOG(LOG_HUGE, "RTP timestamp reset requested\n");
 		context->ts_reset = FALSE;
 		context->base_ts_prev = context->last_ts;
 		context->base_ts = timestamp;
@@ -1024,6 +1140,9 @@ void janus_rtp_simulcasting_context_reset(janus_rtp_simulcasting_context *contex
 	if(context == NULL)
 		return;
 	/* Reset the context values */
+	janus_av1_svc_context_reset(&context->av1_context[0]);
+	janus_av1_svc_context_reset(&context->av1_context[1]);
+	janus_av1_svc_context_reset(&context->av1_context[2]);
 	memset(context, 0, sizeof(*context));
 	context->rid_ext_id = -1;
 	context->substream = -1;
@@ -1082,7 +1201,7 @@ void janus_rtp_simulcasting_cleanup(int *rid_ext_id, uint32_t *ssrcs, char **rid
 }
 
 gboolean janus_rtp_simulcasting_context_process_rtp(janus_rtp_simulcasting_context *context,
-		char *buf, int len, uint32_t *ssrcs, char **rids,
+		char *buf, int len, uint8_t *dd_content, int dd_len, uint32_t *ssrcs, char **rids,
 		janus_videocodec vcodec, janus_rtp_switching_context *sc, janus_mutex *rid_mutex) {
 	if(!context || !buf || len < 1)
 		return FALSE;
@@ -1147,7 +1266,9 @@ gboolean janus_rtp_simulcasting_context_process_rtp(janus_rtp_simulcasting_conte
 	if(context->substream == -1) {
 		if((vcodec == JANUS_VIDEOCODEC_VP8 && janus_vp8_is_keyframe(payload, plen)) ||
 				(vcodec == JANUS_VIDEOCODEC_VP9 && janus_vp9_is_keyframe(payload, plen)) ||
-				(vcodec == JANUS_VIDEOCODEC_H264 && janus_h264_is_keyframe(payload, plen))) {
+				(vcodec == JANUS_VIDEOCODEC_H264 && janus_h264_is_keyframe(payload, plen)) ||
+				(vcodec == JANUS_VIDEOCODEC_AV1 && janus_av1_is_keyframe(payload, plen)) ||
+				(vcodec == JANUS_VIDEOCODEC_H265 && janus_h265_is_keyframe(payload, plen))) {
 			context->substream = substream;
 			/* Notify the caller that the substream changed */
 			context->changed_substream = TRUE;
@@ -1162,7 +1283,9 @@ gboolean janus_rtp_simulcasting_context_process_rtp(janus_rtp_simulcasting_conte
 				(context->substream > target && substream < context->substream)) &&
 					((vcodec == JANUS_VIDEOCODEC_VP8 && janus_vp8_is_keyframe(payload, plen)) ||
 					(vcodec == JANUS_VIDEOCODEC_VP9 && janus_vp9_is_keyframe(payload, plen)) ||
-					(vcodec == JANUS_VIDEOCODEC_H264 && janus_h264_is_keyframe(payload, plen)))) {
+					(vcodec == JANUS_VIDEOCODEC_H264 && janus_h264_is_keyframe(payload, plen)) ||
+					(vcodec == JANUS_VIDEOCODEC_AV1 && janus_av1_is_keyframe(payload, plen)) ||
+					(vcodec == JANUS_VIDEOCODEC_H265 && janus_h265_is_keyframe(payload, plen)))) {
 			JANUS_LOG(LOG_VERB, "Received keyframe on #%d (SSRC %"SCNu32"), switching (was #%d/%"SCNu32")\n",
 				substream, ssrc, context->substream, *(ssrcs + context->substream));
 			context->substream = substream;
@@ -1177,7 +1300,8 @@ gboolean janus_rtp_simulcasting_context_process_rtp(janus_rtp_simulcasting_conte
 		context->last_relayed = now;
 	} else if(context->substream > 0) {
 		/* Check if too much time went by with no packet relayed */
-		if((now - context->last_relayed) > (context->drop_trigger ? context->drop_trigger : 250000)) {
+		gint64 delay_us = (now - context->last_relayed);
+		if(delay_us > (context->drop_trigger ? context->drop_trigger : 250000)) {
 			context->last_relayed = now;
 			if(context->substream != substream && context->substream_target_temp != 0) {
 				if(context->substream_target > substream) {
@@ -1189,8 +1313,8 @@ gboolean janus_rtp_simulcasting_context_process_rtp(janus_rtp_simulcasting_conte
 					if(context->substream_target_temp < 0)
 						context->substream_target_temp = 0;
 					if(context->substream_target_temp != prev_target) {
-						JANUS_LOG(LOG_WARN, "No packet received on substream %d for a while, falling back to %d\n",
-							context->substream, context->substream_target_temp);
+						JANUS_LOG(LOG_WARN, "No packet received on substream %d for %"SCNi64"ms, falling back to %d\n",
+							context->substream, (delay_us / 1000), context->substream_target_temp);
 						/* Notify the caller that we (still) need a PLI */
 						context->need_pli = TRUE;
 					}
@@ -1207,7 +1331,7 @@ gboolean janus_rtp_simulcasting_context_process_rtp(janus_rtp_simulcasting_conte
 		return FALSE;
 	}
 	context->last_relayed = janus_get_monotonic_time();
-	/* Temporal layers are only available for VP8, so don't do anything else for other codecs */
+	/* Temporal layers are only easily available for some codecs */
 	if(vcodec == JANUS_VIDEOCODEC_VP8) {
 		/* Check if there's any temporal scalability to take into account */
 		gboolean m = FALSE;
@@ -1233,11 +1357,324 @@ gboolean janus_rtp_simulcasting_context_process_rtp(janus_rtp_simulcasting_conte
 				return FALSE;
 			}
 		}
+	} else if(vcodec == JANUS_VIDEOCODEC_VP9) {
+		/* We use the VP9 SVC parser to extract info on temporal layers */
+		gboolean found = FALSE;
+		janus_vp9_svc_info svc_info = { 0 };
+		if(janus_vp9_parse_svc(payload, plen, &found, &svc_info) == 0 && found) {
+			int temporal_layer = context->templayer;
+			if(context->templayer_target > context->templayer) {
+				/* We need to upscale */
+				if(svc_info.ubit && svc_info.bbit &&
+						svc_info.temporal_layer > context->templayer &&
+						svc_info.temporal_layer <= context->templayer_target) {
+					context->templayer = svc_info.temporal_layer;
+					temporal_layer = context->templayer;
+					context->changed_temporal = TRUE;
+				}
+			} else if(context->templayer_target < context->templayer) {
+				/* We need to downscale */
+				if(svc_info.ebit && svc_info.temporal_layer == context->templayer_target) {
+					context->templayer = context->templayer_target;
+					context->changed_temporal = TRUE;
+				}
+			}
+			if(temporal_layer < svc_info.temporal_layer) {
+				JANUS_LOG(LOG_HUGE, "Dropping packet (it's temporal layer %d, but we're capping at %d)\n",
+					svc_info.temporal_layer, context->templayer);
+				/* We increase the base sequence number, or there will be gaps when delivering later */
+				if(sc)
+					sc->base_seq++;
+				return FALSE;
+			}
+		}
+	} else if(vcodec == JANUS_VIDEOCODEC_AV1 && dd_content != NULL && dd_len > 0) {
+		/* Use the Dependency Descriptor to check temporal layers */
+		janus_av1_svc_context *av1ctx = NULL;
+		if(context->substream >= 0 && context->substream <= 2)
+			av1ctx = &context->av1_context[context->substream];
+		if(av1ctx != NULL) {
+			uint8_t template = 0;
+			if(janus_av1_svc_context_process_dd(av1ctx, dd_content, dd_len, &template, NULL)) {
+				janus_av1_svc_template *t = g_hash_table_lookup(av1ctx->templates, GUINT_TO_POINTER(template));
+				if(t) {
+					int temporal_layer = context->templayer;
+					if(context->templayer_target > context->templayer) {
+						/* We need to upscale */
+						if(t->temporal > context->templayer && t->temporal <= context->templayer_target) {
+							context->templayer = t->temporal;
+							temporal_layer = context->templayer;
+							context->changed_temporal = TRUE;
+						}
+					} else if(context->templayer_target < context->templayer) {
+						/* We need to downscale */
+						if(t->temporal == context->templayer_target) {
+							context->templayer = context->templayer_target;
+							context->changed_temporal = TRUE;
+						}
+					}
+					if(temporal_layer < t->temporal) {
+						JANUS_LOG(LOG_HUGE, "Dropping packet (it's temporal layer %d, but we're capping at %d)\n",
+							t->temporal, context->templayer);
+						/* We increase the base sequence number, or there will be gaps when delivering later */
+						if(sc)
+							sc->base_seq++;
+						return FALSE;
+					}
+				}
+			}
+		}
 	}
 	/* If we got here, the packet can be relayed */
 	return TRUE;
 }
 
+/* VP9 SVC */
+void janus_rtp_svc_context_reset(janus_rtp_svc_context *context) {
+	if(context == NULL)
+		return;
+	/* Reset the context values */
+	janus_av1_svc_context_reset(&context->dd_context);
+	memset(context, 0, sizeof(*context));
+	context->spatial = -1;
+	context->temporal = -1;
+}
+
+gboolean janus_rtp_svc_context_process_rtp(janus_rtp_svc_context *context,
+		char *buf, int len, uint8_t *dd_content, int dd_len,
+		janus_videocodec vcodec, janus_vp9_svc_info *info, janus_rtp_switching_context *sc) {
+	if(!context || !buf || len < 1 || (vcodec != JANUS_VIDEOCODEC_VP9 && vcodec != JANUS_VIDEOCODEC_AV1))
+		return FALSE;
+	janus_rtp_header *header = (janus_rtp_header *)buf;
+	/* Reset the flags */
+	context->changed_spatial = FALSE;
+	context->changed_temporal = FALSE;
+	context->need_pli = FALSE;
+	gint64 now = janus_get_monotonic_time();
+	/* Access the packet payload */
+	int plen = 0;
+	char *payload = janus_rtp_payload(buf, len, &plen);
+	if(payload == NULL)
+		return FALSE;
+	/* Check if we should use the Dependency Descriptor */
+	if(vcodec == JANUS_VIDEOCODEC_AV1) {
+		/* We do, make sure the data is there */
+		if(dd_content == NULL || dd_len < 1) {
+			/* No Dependency Descriptor, relay as it is */
+			return TRUE;
+		}
+		uint8_t template = 0, ebit = 0;
+		if(!janus_av1_svc_context_process_dd(&context->dd_context, dd_content, dd_len, &template, &ebit)) {
+			/* We couldn't parse the Dependency Descriptor, relay as it is */
+			return TRUE;
+		}
+		janus_av1_svc_template *t = g_hash_table_lookup(context->dd_context.templates, GUINT_TO_POINTER(template));
+		if(t == NULL) {
+			/* We couldn't find the template, relay as it is */
+			return TRUE;
+		}
+		/* Now let's check if we should let the packet through or not */
+		gboolean keyframe = janus_av1_is_keyframe((const char *)payload, plen);
+		gboolean override_mark_bit = FALSE, has_marker_bit = header->markerbit;
+		int spatial_layer = context->spatial;
+		if(t->spatial >= 0 && t->spatial <= 2)
+			context->last_spatial_layer[t->spatial] = now;
+		if(context->spatial_target > context->spatial) {
+			JANUS_LOG(LOG_HUGE, "We need to upscale spatially: (%d < %d)\n",
+				context->spatial, context->spatial_target);
+			/* We need to upscale: wait for a keyframe */
+			if(keyframe) {
+				int new_spatial_layer = context->spatial_target;
+				while(new_spatial_layer > context->spatial && new_spatial_layer > 0) {
+					if(now - context->last_spatial_layer[new_spatial_layer] >= (context->drop_trigger ? context->drop_trigger : 250000)) {
+						/* We haven't received packets from this layer for a while, try a lower layer */
+						JANUS_LOG(LOG_HUGE, "Haven't received packets from layer %d for a while, trying %d instead...\n",
+							new_spatial_layer, new_spatial_layer-1);
+						new_spatial_layer--;
+					} else {
+						break;
+					}
+				}
+				if(new_spatial_layer > context->spatial) {
+					JANUS_LOG(LOG_HUGE, "  -- Upscaling spatial layer: %d --> %d (need %d)\n",
+						context->spatial, new_spatial_layer, context->spatial_target);
+					context->spatial = new_spatial_layer;
+					spatial_layer = context->spatial;
+					context->changed_spatial = TRUE;
+				}
+			}
+		} else if(context->spatial_target < context->spatial) {
+			/* We need to scale: wait for a keyframe */
+			JANUS_LOG(LOG_HUGE, "We need to downscale spatially: (%d > %d)\n",
+				context->spatial, context->spatial_target);
+			/* Check the E bit to see if this is an end-of-frame */
+			if(ebit) {
+				JANUS_LOG(LOG_HUGE, "  -- Downscaling spatial layer: %d --> %d\n",
+					context->spatial, context->spatial_target);
+				context->spatial = context->spatial_target;
+				context->changed_spatial = TRUE;
+			}
+		}
+		if(spatial_layer < t->spatial) {
+			/* Drop the packet: update the context to make sure sequence number is increased normally later */
+			JANUS_LOG(LOG_HUGE, "Dropping packet (spatial layer %d < %d)\n", spatial_layer, t->spatial);
+			if(sc)
+				sc->base_seq++;
+			return FALSE;
+		} else if(ebit && spatial_layer == t->spatial) {
+			/* If we stop at layer 0, we need a marker bit now, as the one from layer 1 will not be received */
+			override_mark_bit = TRUE;
+		}
+		int temporal = context->temporal;
+		if(context->temporal_target > context->temporal) {
+			/* We need to upscale */
+			if(t->temporal > context->temporal && t->temporal <= context->temporal_target) {
+				context->temporal = t->temporal;
+				temporal = context->temporal;
+				context->changed_temporal = TRUE;
+			}
+		} else if(context->temporal_target < context->temporal) {
+			/* We need to downscale */
+			if(t->temporal == context->temporal_target) {
+				context->temporal = context->temporal_target;
+				context->changed_temporal = TRUE;
+			}
+		}
+		if(temporal < t->temporal) {
+			JANUS_LOG(LOG_HUGE, "Dropping packet (it's temporal layer %d, but we're capping at %d)\n",
+				t->temporal, context->temporal);
+			/* We increase the base sequence number, or there will be gaps when delivering later */
+			if(sc)
+				sc->base_seq++;
+			return FALSE;
+		}
+		/* If we got here, we can send the frame: this doesn't necessarily mean it's
+		 * one of the layers the user wants, as there may be dependencies involved */
+		JANUS_LOG(LOG_HUGE, "Sending packet (spatial=%d, temporal=%d)\n",
+			t->spatial, t->temporal);
+		if(override_mark_bit && !has_marker_bit)
+			header->markerbit = 1;
+		return TRUE;
+	}
+	/* If we got here, it's VP9, for which we parse the payload manually:
+	 * if we don't have any info parsed from the VP9 payload header, get it now */
+	janus_vp9_svc_info svc_info = { 0 };
+	if(!info) {
+		gboolean found = FALSE;
+		if(janus_vp9_parse_svc(payload, plen, &found, &svc_info) < 0) {
+			/* Error parsing, relay as it is */
+			return TRUE;
+		}
+		if(!found) {
+			/* No SVC info, maybe a generic VP9 payload? Relay as it is */
+			return TRUE;
+		}
+	} else {
+		svc_info = *info;
+	}
+	/* Note: Following code inspired by the excellent job done by Sergio Garcia Murillo here:
+	 * https://github.com/medooze/media-server/blob/master/src/vp9/VP9LayerSelector.cpp */
+	gboolean keyframe = janus_vp9_is_keyframe((const char *)payload, plen);
+	gboolean override_mark_bit = FALSE, has_marker_bit = header->markerbit;
+	int spatial_layer = context->spatial;
+	if(svc_info.spatial_layer >= 0 && svc_info.spatial_layer <= 2)
+		context->last_spatial_layer[svc_info.spatial_layer] = now;
+	if(context->spatial_target > context->spatial) {
+		JANUS_LOG(LOG_HUGE, "We need to upscale spatially: (%d < %d)\n",
+			context->spatial, context->spatial_target);
+		/* We need to upscale: wait for a keyframe */
+		if(keyframe) {
+			int new_spatial_layer = context->spatial_target;
+			while(new_spatial_layer > context->spatial && new_spatial_layer > 0) {
+				if(now - context->last_spatial_layer[new_spatial_layer] >= (context->drop_trigger ? context->drop_trigger : 250000)) {
+					/* We haven't received packets from this layer for a while, try a lower layer */
+					JANUS_LOG(LOG_HUGE, "Haven't received packets from layer %d for a while, trying %d instead...\n",
+						new_spatial_layer, new_spatial_layer-1);
+					new_spatial_layer--;
+				} else {
+					break;
+				}
+			}
+			if(new_spatial_layer > context->spatial) {
+				JANUS_LOG(LOG_HUGE, "  -- Upscaling spatial layer: %d --> %d (need %d)\n",
+					context->spatial, new_spatial_layer, context->spatial_target);
+				context->spatial = new_spatial_layer;
+				spatial_layer = context->spatial;
+				context->changed_spatial = TRUE;
+			}
+		}
+	} else if(context->spatial_target < context->spatial) {
+		/* We need to downscale */
+		JANUS_LOG(LOG_HUGE, "We need to downscale spatially: (%d > %d)\n",
+			context->spatial, context->spatial_target);
+		gboolean downscaled = FALSE;
+		if(!svc_info.fbit && keyframe) {
+			/* Non-flexible mode: wait for a keyframe */
+			downscaled = TRUE;
+		} else if(svc_info.fbit && svc_info.ebit) {
+			/* Flexible mode: check the E bit */
+			downscaled = TRUE;
+		}
+		if(downscaled) {
+			JANUS_LOG(LOG_HUGE, "  -- Downscaling spatial layer: %d --> %d\n",
+				context->spatial, context->spatial_target);
+			context->spatial = context->spatial_target;
+			context->changed_spatial = TRUE;
+		}
+	}
+	if(spatial_layer < svc_info.spatial_layer) {
+		/* Drop the packet: update the context to make sure sequence number is increased normally later */
+		JANUS_LOG(LOG_HUGE, "Dropping packet (spatial layer %d < %d)\n", spatial_layer, svc_info.spatial_layer);
+		if(sc)
+			sc->base_seq++;
+		return FALSE;
+	} else if(svc_info.ebit && spatial_layer == svc_info.spatial_layer) {
+		/* If we stop at layer 0, we need a marker bit now, as the one from layer 1 will not be received */
+		override_mark_bit = TRUE;
+	}
+	int temporal_layer = context->temporal;
+	if(context->temporal_target > context->temporal) {
+		/* We need to upscale */
+		JANUS_LOG(LOG_HUGE, "We need to upscale temporally: (%d < %d)\n",
+			context->temporal, context->temporal_target);
+		if(svc_info.ubit && svc_info.bbit &&
+				svc_info.temporal_layer > context->temporal &&
+				svc_info.temporal_layer <= context->temporal_target) {
+			JANUS_LOG(LOG_HUGE, "  -- Upscaling temporal layer: %d --> %d (want %d)\n",
+				context->temporal, svc_info.temporal_layer, context->temporal_target);
+			context->temporal = svc_info.temporal_layer;
+			temporal_layer = context->temporal;
+			context->changed_temporal = TRUE;
+		}
+	} else if(context->temporal_target < context->temporal) {
+		/* We need to downscale */
+		JANUS_LOG(LOG_HUGE, "We need to downscale temporally: (%d > %d)\n",
+			context->temporal, context->temporal_target);
+		if(svc_info.ebit && svc_info.temporal_layer == context->temporal_target) {
+			JANUS_LOG(LOG_HUGE, "  -- Downscaling temporal layer: %d --> %d\n",
+				context->temporal, context->temporal_target);
+			context->temporal = context->temporal_target;
+			context->changed_temporal = TRUE;
+		}
+	}
+	if(temporal_layer < svc_info.temporal_layer) {
+		/* Drop the packet: update the context to make sure sequence number is increased normally later */
+		JANUS_LOG(LOG_HUGE, "Dropping packet (temporal layer %d < %d)\n", temporal_layer, svc_info.temporal_layer);
+		if(sc)
+			sc->base_seq++;
+		return FALSE;
+	}
+	/* If we got here, we can send the frame: this doesn't necessarily mean it's
+	 * one of the layers the user wants, as there may be dependencies involved */
+	JANUS_LOG(LOG_HUGE, "Sending packet (spatial=%d, temporal=%d)\n",
+		svc_info.spatial_layer, svc_info.temporal_layer);
+	if(override_mark_bit && !has_marker_bit)
+		header->markerbit = 1;
+	/* If we got here, the packet can be relayed */
+	return TRUE;
+}
+
+/* AV1 SVC (still WIP) */
 void janus_av1_svc_context_reset(janus_av1_svc_context *context) {
 	if(context == NULL)
 		return;
@@ -1248,7 +1685,7 @@ void janus_av1_svc_context_reset(janus_av1_svc_context *context) {
 }
 
 gboolean janus_av1_svc_context_process_dd(janus_av1_svc_context *context,
-		uint8_t *dd, int dd_len, uint8_t *template_id) {
+		uint8_t *dd, int dd_len, uint8_t *template_id, uint8_t *ebit) {
 	if(!context || !dd || dd_len < 3)
 		return FALSE;
 
@@ -1258,9 +1695,11 @@ gboolean janus_av1_svc_context_process_dd(janus_av1_svc_context *context,
 	/* mandatory_descriptor_fields() */
 	uint8_t start = janus_bitstream_getbit(dd, offset++);
 	uint8_t end = janus_bitstream_getbit(dd, offset++);
+	if(ebit)
+		*ebit = end;
 	uint8_t template = janus_bitstream_getbits(dd, 6, &offset);
 	uint16_t frame = janus_bitstream_getbits(dd, 16, &offset);
-	JANUS_LOG(LOG_WARN, "  -- s=%u, e=%u, t=%u, f=%u\n",
+	JANUS_LOG(LOG_HUGE, "  -- s=%u, e=%u, t=%u, f=%u\n",
 		start, end, template, frame);
 	if(blen > 24) {
 		/* extended_descriptor_fields() */
@@ -1292,7 +1731,7 @@ gboolean janus_av1_svc_context_process_dd(janus_av1_svc_context *context,
 				}
 				t->spatial = spatial_layers;
 				t->temporal = temporal_layers;
-				JANUS_LOG(LOG_WARN, "  -- -- -- [%u] spatial=%u, temporal=%u\n",
+				JANUS_LOG(LOG_HUGE, "  -- -- -- [%u] spatial=%u, temporal=%u\n",
 					tcnt, t->spatial, t->temporal);
 				if(nlidc == 1) {
 					temporal_layers++;
@@ -1316,14 +1755,14 @@ gboolean janus_av1_svc_context_process_dd(janus_av1_svc_context *context,
 	}
 	/* frame_dependency_definition() */
 	uint8_t tindex = (template + 64 - context->tioff) % 64;
-	janus_av1_svc_template *t = g_hash_table_lookup(context->templates,
-		GUINT_TO_POINTER(tindex));
+	janus_av1_svc_template *t = context->templates ? g_hash_table_lookup(context->templates,
+		GUINT_TO_POINTER(tindex)) : NULL;
 	if(t == NULL) {
 		JANUS_LOG(LOG_WARN, "Invalid template ID '%u' (count is %u), ignoring packet...\n",
 			tindex, context->tcnt);
 		return FALSE;
 	}
-	JANUS_LOG(LOG_WARN, "  -- spatial=%u, temporal=%u (tindex %u)\n",
+	JANUS_LOG(LOG_HUGE, "  -- spatial=%u, temporal=%u (tindex %u)\n",
 		t->spatial, t->temporal, t->id);
 	/* FIXME We currently don't care about the other fields */
 

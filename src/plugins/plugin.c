@@ -48,6 +48,8 @@ void janus_plugin_rtp_extensions_reset(janus_plugin_rtp_extensions *extensions) 
 		extensions->max_delay = -1;
 		extensions->dd_len = 0;
 		memset(extensions->dd_content, 0, sizeof(extensions->dd_content));
+		extensions->spatial_layers = -1;
+		extensions->temporal_layers = -1;
 	}
 }
 void janus_plugin_rtp_reset(janus_plugin_rtp *packet) {
@@ -56,6 +58,24 @@ void janus_plugin_rtp_reset(janus_plugin_rtp *packet) {
 		packet->mindex = -1;
 		janus_plugin_rtp_extensions_reset(&packet->extensions);
 	}
+}
+janus_plugin_rtp *janus_plugin_rtp_duplicate(janus_plugin_rtp *packet) {
+	janus_plugin_rtp *p = NULL;
+	if(packet) {
+		p = g_malloc(sizeof(janus_plugin_rtp));
+		p->mindex = packet->mindex;
+		p->video = packet->video;
+		if(packet->buffer == NULL || packet->length == 0) {
+			p->buffer = NULL;
+			p->length = 0;
+		} else {
+			p->buffer = g_malloc(packet->length);
+			memcpy(p->buffer, packet->buffer, packet->length);
+			p->length = packet->length;
+		}
+		p->extensions = packet->extensions;
+	}
+	return p;
 }
 void janus_plugin_rtcp_reset(janus_plugin_rtcp *packet) {
 	if(packet) {

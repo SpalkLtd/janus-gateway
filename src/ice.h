@@ -151,6 +151,15 @@ void janus_ice_set_nomination_mode(const char *nomination);
  * @returns "regular" or "aggressive" */
 const char *janus_ice_get_nomination_mode(void);
 #endif
+/*! \brief Method to enable/disable consent freshness in PeerConnections.
+ * \note This is only available on libnice >= 0.1.19, and automatically enables
+ * keepalive connectivity checks too. Documentation for the setting:
+ * https://libnice.freedesktop.org/libnice/NiceAgent.html#NiceAgent--consent-freshness
+ * @param[in] enabled Whether the functionality should be enabled or disabled */
+void janus_ice_set_consent_freshness_enabled(gboolean enabled);
+/*! \brief Method to check whether consent fresnhess will be enabled in ICE
+ * @returns true if enabled, false (default) otherwise */
+gboolean janus_ice_is_consent_freshness_enabled(void);
 /*! \brief Method to enable/disable connectivity checks as keepalives for PeerConnections.
  * \note The main rationale behind this setting is provided in the libnice documentation:
  * https://libnice.freedesktop.org/libnice/NiceAgent.html#NiceAgent--keepalive-conncheck
@@ -159,6 +168,12 @@ void janus_ice_set_keepalive_conncheck_enabled(gboolean enabled);
 /*! \brief Method to check whether connectivity checks will be used as keepalives
  * @returns true if enabled, false (default) otherwise */
 gboolean janus_ice_is_keepalive_conncheck_enabled(void);
+/*! \brief Method to enable/disable immediate hangups of PeerConnectionss on ICE failures.
+ * @param[in] enabled Whether the functionality should be enabled or disabled */
+void janus_ice_set_hangup_on_failed_enabled(gboolean enabled);
+/*! \brief Method to check whether ICE failures will result in immediate hangups
+ * @returns true if enabled, false (default) otherwise */
+gboolean janus_ice_is_hangup_on_failed_enabled(void);
 /*! \brief Method to modify the min NACK value (i.e., the minimum time window of packets per handle to store for retransmissions)
  * @param[in] mnq The new min NACK value */
 void janus_set_min_nack_queue(uint16_t mnq);
@@ -205,21 +220,17 @@ void janus_ice_set_event_stats_period(int period);
 /*! \brief Method to get the current event handler statistics period (see above)
  * @returns The current event handler stats period */
 int janus_ice_get_event_stats_period(void);
+/*! \brief Method to get the number of active PeerConnection (for stats)
+ * @returns The current number of active PeerConnections */
+int janus_ice_get_peerconnection_num(void);
 
-/*! \brief Method to define wether the media stats shall be dispatched in one event (true) or in dedicated single events (false - default)
+/*! \brief Method to define whether the media stats shall be dispatched in one event (true) or in dedicated single events (false - default)
  * @param[in] combine_media_stats_to_one_event true to combine media statistics in on event or false to send dedicated events */
 void janus_ice_event_set_combine_media_stats(gboolean combine_media_stats_to_one_event);
-/*! \brief Method to retrieve wether media statistic events shall be dispatched combined or in single events
+/*! \brief Method to retrieve whether media statistic events shall be dispatched combined or in single events
  * @returns true to combine events */
 gboolean janus_ice_event_get_combine_media_stats(void);
 
-/*! \brief Method to check whether libnice debugging has been enabled (http://nice.freedesktop.org/libnice/libnice-Debug-messages.html)
- * @returns True if libnice debugging is enabled, FALSE otherwise */
-gboolean janus_ice_is_ice_debugging_enabled(void);
-/*! \brief Method to enable libnice debugging (http://nice.freedesktop.org/libnice/libnice-Debug-messages.html) */
-void janus_ice_debugging_enable(void);
-/*! \brief Method to disable libnice debugging (the default) */
-void janus_ice_debugging_disable(void);
 /*! \brief Method to enable opaque ID in Janus API responses/events */
 void janus_enable_opaqueid_in_api(void);
 /*! \brief Method to check whether opaque ID have to be added to Janus API responses/events
@@ -402,6 +413,8 @@ struct janus_ice_handle {
 	janus_text2pcap *text2pcap;
 	/*! \brief Mutex to lock/unlock the ICE session */
 	janus_mutex mutex;
+	/*! \brief Atomic flag to check whether a PeerConnection was established */
+	volatile gint has_pc;
 	/*! \brief Whether a close_pc was requested recently on the PeerConnection */
 	volatile gint closepc;
 	/*! \brief Atomic flag to check if this instance has been destroyed */
@@ -419,7 +432,7 @@ struct janus_ice_peerconnection {
 	/*! \brief libnice ICE component ID */
 	guint component_id;
 	/*! \brief Whether this stream is ready to be used */
-	gint cdone:1;
+	gboolean cdone;
 	/*! \brief libnice ICE component state */
 	guint state;
 	/*! \brief Monotonic time of when gathering has completed */
@@ -458,6 +471,14 @@ struct janus_ice_peerconnection {
 	gint dependencydesc_ext_id;
 	/*! \brief Absolute Send Time ext ID */
 	gint abs_send_time_ext_id;
+	/*! \brief Absolute Capture Time ext ID */
+	gint abs_capture_time_ext_id;
+	/*! \brief Whether to use abs-capture-time as the NTP source for RTCP SR,
+	 * instead of wall-clock. When enabled, RTCP Sender Reports reflect
+	 * original capture time, preserving A/V lip-sync across interleave skew. */
+	gboolean abs_capture_time_source_sr;
+	/*! \brief Video Layers Allocation ext ID */
+	gint videolayers_ext_id;
 	/*! \brief Whether we do transport wide cc */
 	gboolean do_transport_wide_cc;
 	/*! \brief Transport wide cc rtp ext ID */
@@ -480,7 +501,7 @@ struct janus_ice_peerconnection {
 	janus_dtls_role dtls_role;
 	/*! \brief Data exchanged for DTLS handshakes and messages */
 	janus_ice_stats dtls_in_stats, dtls_out_stats;
-	/*! \brief Hashing algorhitm used by the peer for the DTLS certificate (e.g., "SHA-256") */
+	/*! \brief Hashing algorithm used by the peer for the DTLS certificate (e.g., "SHA-256") */
 	gchar *remote_hashing;
 	/*! \brief Hashed fingerprint of the peer's certificate, as parsed in SDP */
 	gchar *remote_fingerprint;
@@ -507,6 +528,8 @@ struct janus_ice_peerconnection {
 	GHashTable *rtx_payload_types;
 	/*! \brief Reverse mapping of rtx payload types to actual media-related packet types */
 	GHashTable *rtx_payload_types_rev;
+	/*! \brief Helper queue for storing requested packets from NACKs */
+	GQueue *nacks_queue;
 	/*! \brief Helper flag to avoid flooding the console with the same error all over again */
 	gboolean noerrorlog;
 	/*! \brief Mutex to lock/unlock this stream */
@@ -678,7 +701,7 @@ gint janus_ice_handle_destroy(void *core_session, janus_ice_handle *handle);
  * @param[in] reason A description of why this happened */
 void janus_ice_webrtc_hangup(janus_ice_handle *handle, const char *reason);
 /*! \brief Method to only free resources related to a specific Webrtc PeerConnection allocated by a Janus ICE handle
- * @param[in] component The Janus ICE component instance to free */
+ * @param[in] pc The Janus ICE component instance to free */
 void janus_ice_peerconnection_destroy(janus_ice_peerconnection *pc);
 ///@}
 

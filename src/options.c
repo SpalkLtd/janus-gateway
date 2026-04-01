@@ -9,6 +9,7 @@
  */
 
 #include "options.h"
+#include "debug.h"
 
 static GOptionContext *opts = NULL;
 
@@ -20,6 +21,7 @@ gboolean janus_options_parse(janus_options *options, int argc, char *argv[]) {
 		{ "disable-stdout", 'N', 0, G_OPTION_ARG_NONE, &options->disable_stdout, "Disable stdout based logging", NULL },
 		{ "log-stdout", 0, 0, G_OPTION_ARG_NONE, &options->log_stdout, "Log to stdout, even when the process is daemonized", NULL },
 		{ "log-file", 'L', 0, G_OPTION_ARG_STRING, &options->log_file, "Log to the specified file (default=stdout only)", "path" },
+		{ "log-rotate-sig", 'R', 0, G_OPTION_ARG_STRING, &options->log_rotate_sig, "Signal to trigger log reloading (e.g. SIGUSR1) (default=none)", "signal" },
 		{ "cwd-path", 'H', 0, G_OPTION_ARG_STRING, &options->cwd_path, "Working directory for Janus daemon process (default=/)", "path" },
 		{ "interface", 'i', 0, G_OPTION_ARG_STRING, &options->interface, "Interface to use (will be the public IP)", "ipaddress" },
 		{ "plugins-folder", 'P', 0, G_OPTION_ARG_STRING, &options->plugins_folder, "Plugins folder (default=./plugins)", "path" },
@@ -35,7 +37,6 @@ gboolean janus_options_parse(janus_options *options, int argc, char *argv[]) {
 		{ "ice-ignore-list", 'X', 0, G_OPTION_ARG_STRING, &options->ice_ignore_list, "Comma-separated list of interfaces or IP addresses to ignore for ICE gathering; partial strings are supported (e.g., vmnet8,192.168.0.1,10.0.0.1 or vmnet,192.168., default=vmnet)", "list" },
 		{ "ipv6-candidates", '6', 0, G_OPTION_ARG_NONE, &options->ipv6_candidates, "Whether to enable IPv6 candidates or not", NULL },
 		{ "ipv6-link-local", 'O', 0, G_OPTION_ARG_NONE, &options->ipv6_link_local, "Whether IPv6 link-local candidates should be gathered as well", NULL },
-		{ "libnice-debug", 'l', 0, G_OPTION_ARG_NONE, &options->libnice_debug, "Whether to enable libnice debugging or not", NULL },
 		{ "full-trickle", 'f', 0, G_OPTION_ARG_NONE, &options->full_trickle, "Do full-trickle instead of half-trickle", NULL },
 		{ "ice-lite", 'I', 0, G_OPTION_ARG_NONE, &options->ice_lite, "Whether to enable the ICE Lite mode or not", NULL },
 		{ "ice-tcp", 'T', 0, G_OPTION_ARG_NONE, &options->ice_tcp, "Whether to enable ICE-TCP or not (warning: only works with ICE Lite)", NULL },
@@ -53,10 +54,11 @@ gboolean janus_options_parse(janus_options *options, int argc, char *argv[]) {
 		{ "debug-locks", 'M', 0, G_OPTION_ARG_NONE, &options->debug_locks, "Enable debugging of locks/mutexes (very verbose!)", NULL },
 		{ "apisecret", 'a', 0, G_OPTION_ARG_STRING, &options->apisecret, "API secret all requests need to pass in order to be accepted by Janus (useful when wrapping Janus API requests in a server, none by default)", "randomstring" },
 		{ "token-auth", 'A', 0, G_OPTION_ARG_NONE, &options->token_auth, "Enable token-based authentication for all requests", NULL },
-		{ "token-auth-secret", 0, 0, G_OPTION_ARG_INT, &options->token_auth_secret, "Secret to verify HMAC-signed tokens with, to be used with -A", "randomstring" },
+		{ "token-auth-secret", 0, 0, G_OPTION_ARG_STRING, &options->token_auth_secret, "Secret to verify HMAC-signed tokens with, to be used with -A", "randomstring" },
 		{ "event-handlers", 'e', 0, G_OPTION_ARG_NONE, &options->event_handlers, "Enable event handlers", NULL },
 		{ "no-webrtc-encryption", 'w', 0, G_OPTION_ARG_NONE, &options->no_webrtc_encryption, "Disable WebRTC encryption, so no DTLS or SRTP (only for debugging!)", NULL },
-		{ NULL },
+		{ "version", 'V', 0, G_OPTION_ARG_NONE, &options->print_version, "Print version and exit", NULL },
+		{ NULL, 0, 0, 0, NULL, NULL, NULL },
 	};
 
 	/* Parse the command-line arguments */
@@ -65,7 +67,7 @@ gboolean janus_options_parse(janus_options *options, int argc, char *argv[]) {
 	g_option_context_set_help_enabled(opts, TRUE);
 	g_option_context_add_main_entries(opts, opt_entries, NULL);
 	if(!g_option_context_parse(opts, &argc, &argv, &error)) {
-		g_print("%s\n", error->message);
+		JANUS_PRINT("%s\n", error->message);
 		g_error_free(error);
 		janus_options_destroy();
 		return FALSE;
