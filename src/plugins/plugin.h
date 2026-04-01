@@ -439,6 +439,15 @@ struct janus_callbacks {
 	 * @param[in] desc The descriptor to search for
 	 * @returns TRUE if the token is valid, not expired and contains the descriptor, FALSE otherwise */
 	gboolean (* const auth_signature_contains)(janus_plugin *plugin, const char *token, const char *descriptor);
+
+	/*! \brief Callback to enable/disable using abs-capture-time as the NTP
+	 * source for outgoing RTCP Sender Reports on this session. When enabled,
+	 * SR NTP/RTP mappings reflect original capture time instead of Janus
+	 * wall-clock, preserving A/V lip-sync across interleave skew.
+	 * @param[in] handle The plugin/gateway session
+	 * @param[in] enabled TRUE to derive SR NTP from abs-capture-time,
+	 * FALSE to use wall-clock (the default) */
+	void (* const set_cap_time_sr_source)(janus_plugin_session *handle, gboolean enabled);
 };
 
 /*! \brief The hook that plugins need to implement to be created from the Janus core */
