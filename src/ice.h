@@ -473,6 +473,10 @@ struct janus_ice_peerconnection {
 	gint abs_send_time_ext_id;
 	/*! \brief Absolute Capture Time ext ID */
 	gint abs_capture_time_ext_id;
+	/*! \brief Whether to use abs-capture-time as the NTP source for RTCP SR,
+	 * instead of wall-clock. When enabled, RTCP Sender Reports reflect
+	 * original capture time, preserving A/V lip-sync across interleave skew. */
+	gboolean abs_capture_time_source_sr;
 	/*! \brief Video Layers Allocation ext ID */
 	gint videolayers_ext_id;
 	/*! \brief Whether we do transport wide cc */
