@@ -627,6 +627,7 @@ void janus_plugin_notify_event(janus_plugin *plugin, janus_plugin_session *plugi
 gboolean janus_plugin_auth_is_signed(void);
 gboolean janus_plugin_auth_is_signature_valid(janus_plugin *plugin, const char *token);
 gboolean janus_plugin_auth_signature_contains(janus_plugin *plugin, const char *token, const char *desc);
+void janus_plugin_set_cap_time_sr_source(janus_plugin_session *plugin_session, gboolean enabled);
 static janus_callbacks janus_handler_plugin =
 	{
 		.push_event = janus_plugin_push_event,
@@ -643,6 +644,7 @@ static janus_callbacks janus_handler_plugin =
 		.auth_is_signed = janus_plugin_auth_is_signed,
 		.auth_is_signature_valid = janus_plugin_auth_is_signature_valid,
 		.auth_signature_contains = janus_plugin_auth_signature_contains,
+		.set_cap_time_sr_source = janus_plugin_set_cap_time_sr_source,
 	};
 ///@}
 
@@ -4291,6 +4293,17 @@ void janus_plugin_send_remb(janus_plugin_session *plugin_session, uint32_t bitra
 			|| janus_flags_is_set(&handle->webrtc_flags, JANUS_ICE_HANDLE_WEBRTC_ALERT))
 		return;
 	janus_ice_send_remb(handle, bitrate);
+}
+
+void janus_plugin_set_cap_time_sr_source(janus_plugin_session *plugin_session, gboolean enabled) {
+	if((plugin_session < (janus_plugin_session *)0x1000) || g_atomic_int_get(&plugin_session->stopped))
+		return;
+	janus_ice_handle *handle = (janus_ice_handle *)plugin_session->gateway_handle;
+	if(!handle || !handle->pc)
+		return;
+	handle->pc->abs_capture_time_source_sr = enabled;
+	JANUS_LOG(LOG_INFO, "[%"SCNu64"] abs-capture-time as SR source: %s\n",
+		handle->handle_id, enabled ? "enabled" : "disabled");
 }
 
 static gboolean janus_plugin_close_pc_internal(gpointer user_data) {

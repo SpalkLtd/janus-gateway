@@ -4974,15 +4974,37 @@ static gboolean janus_ice_outgoing_traffic_handle(janus_ice_handle *handle, janu
 							medium->out_stats.info[0].updated = now;
 						}
 						medium->out_stats.info[0].bytes_lastsec_temp += pkt->length;
-						struct timeval tv;
-						gettimeofday(&tv, NULL);
-						if(medium->last_ntp_ts == 0 || (gint32)(timestamp - medium->last_rtp_ts) > 0) {
-							medium->last_ntp_ts = (gint64)tv.tv_sec*G_USEC_PER_SEC + tv.tv_usec;
-							medium->last_rtp_ts = timestamp;
-						}
-						if(medium->first_ntp_ts[0] == 0) {
-							medium->first_ntp_ts[0] = (gint64)tv.tv_sec*G_USEC_PER_SEC + tv.tv_usec;
-							medium->first_rtp_ts[0] = timestamp;
+						if(pkt->extensions.abs_capture_ts > 0 && medium->pc && medium->pc->abs_capture_time_source_sr) {
+							/* Use abs-capture-time from the source for NTP/RTP mapping,
+							 * so that RTCP SR reflects original capture time rather than
+							 * Janus wall-clock send time. This preserves A/V sync when
+							 * audio and video arrive at Janus with interleave skew. */
+							uint32_t ntp_sec = (uint32_t)(pkt->extensions.abs_capture_ts >> 32);
+							uint32_t ntp_frac = (uint32_t)(pkt->extensions.abs_capture_ts & 0xFFFFFFFF);
+							/* NTP epoch (1900) -> Unix epoch (1970) */
+							int64_t unix_sec = (int64_t)ntp_sec - 2208988800LL;
+							int64_t usec = ((int64_t)ntp_frac * 1000000) >> 32;
+							gint64 capture_ntp_us = unix_sec * G_USEC_PER_SEC + usec;
+							if(medium->last_ntp_ts == 0 || (gint32)(timestamp - medium->last_rtp_ts) > 0) {
+								medium->last_ntp_ts = capture_ntp_us;
+								medium->last_rtp_ts = timestamp;
+							}
+							if(medium->first_ntp_ts[0] == 0) {
+								medium->first_ntp_ts[0] = capture_ntp_us;
+								medium->first_rtp_ts[0] = timestamp;
+							}
+						} else {
+							/* Fallback to wall-clock when abs-capture-time is absent */
+							struct timeval tv;
+							gettimeofday(&tv, NULL);
+							if(medium->last_ntp_ts == 0 || (gint32)(timestamp - medium->last_rtp_ts) > 0) {
+								medium->last_ntp_ts = (gint64)tv.tv_sec*G_USEC_PER_SEC + tv.tv_usec;
+								medium->last_rtp_ts = timestamp;
+							}
+							if(medium->first_ntp_ts[0] == 0) {
+								medium->first_ntp_ts[0] = (gint64)tv.tv_sec*G_USEC_PER_SEC + tv.tv_usec;
+								medium->first_rtp_ts[0] = timestamp;
+							}
 						}
 						/* Update sent packets counter */
 						rtcp_context *rtcp_ctx = medium->rtcp_ctx[0];

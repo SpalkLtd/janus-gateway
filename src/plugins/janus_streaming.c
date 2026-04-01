@@ -1071,6 +1071,7 @@ static struct janus_json_parameter watch_parameters[] = {
 	{"pin", JSON_STRING, 0},
 	{"media", JANUS_JSON_ARRAY, 0},
 	{"restart", JANUS_JSON_BOOL, 0},
+	{"abs_capture_time_sr", JANUS_JSON_BOOL, 0},
 	/* Deprecated parameters: still there only for
 	 * backwards compatibility, but not for long */
 	{"offer_audio", JANUS_JSON_BOOL, 0},
@@ -1634,6 +1635,8 @@ typedef struct janus_streaming_session {
 	gboolean playoutdelay_ext;
 	/* Extension header id in RTP source with abs-capture-time */
 	int abscapturetime_src_ext_id;
+	/* Whether to use abs-capture-time as the NTP source for RTCP SR */
+	gboolean abs_capture_time_sr;
 	janus_mutex mutex;
 	volatile gint dataready;
 	volatile gint stopping;
@@ -5832,6 +5835,9 @@ void janus_streaming_setup_media(janus_plugin_session *handle) {
 			temp = temp->next;
 		}
 	}
+	/* Enable abs-capture-time as SR source if requested */
+	if(session->abs_capture_time_sr)
+		gateway->set_cap_time_sr_source(session->handle, TRUE);
 	g_atomic_int_set(&session->started, 1);
 	/* Prepare JSON event */
 	json_t *event = json_object();
@@ -6121,6 +6127,8 @@ static void *janus_streaming_handler(void *data) {
 			/* There may be an ICE restart request involved */
 			json_t *restart = json_object_get(root, "restart");
 			do_restart = restart ? json_is_true(restart) : FALSE;
+			/* Check if abs-capture-time should be used for RTCP SR */
+			json_t *act_sr = json_object_get(root, "abs_capture_time_sr");
 			/* Find the mountpoint and go on */
 			janus_mutex_lock(&mountpoints_mutex);
 			janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints,
@@ -6440,6 +6448,8 @@ static void *janus_streaming_handler(void *data) {
 				session->playoutdelay_ext = source->playoutdelay_ext;
 				/* Also check if we have to offer the abs-capture-time extension */
 				session->abscapturetime_src_ext_id = source->abscapturetime_src_ext_id;
+				/* Check if the subscriber wants abs-capture-time used for RTCP SR */
+				session->abs_capture_time_sr = act_sr ? json_is_true(act_sr) : FALSE;
 			}
 			janus_refcount_increase(&session->ref);
 done:
@@ -6610,6 +6620,8 @@ done:
 			} else {
 				id_value_str = (char *)json_string_value(id);
 			}
+			/* Check if abs-capture-time should be used for RTCP SR */
+			json_t *act_sr = json_object_get(root, "abs_capture_time_sr");
 			/* Find the mountpoint and go on */
 			janus_mutex_lock(&mountpoints_mutex);
 			janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints,
@@ -6778,6 +6790,8 @@ done:
 						session->playoutdelay_ext = source->playoutdelay_ext;
 						/* Also check if we have to offer the abs-capture-time extension */
 						session->abscapturetime_src_ext_id = source->abscapturetime_src_ext_id;
+						/* Check if the subscriber wants abs-capture-time used for RTCP SR */
+						session->abs_capture_time_sr = act_sr ? json_is_true(act_sr) : FALSE;
 						/* Accept the m-line */
 						janus_sdp_generate_answer_mline(parsed_sdp, answer, m,
 							JANUS_SDP_OA_MLINE, m->type,
