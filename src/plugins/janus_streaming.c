@@ -7218,12 +7218,14 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
 					error->code, error->message ? error->message : "??");
 				g_error_free(error);
 				janus_refcount_decrease(&live_rtp->ref);	/* This is for the helper thread */
-				g_async_queue_unref(helper->queued_packets);
+				/* janus_streaming_helper_free unrefs the queue */
 				janus_refcount_decrease(&helper->ref);
 				/* This extra unref is for the init */
 				janus_refcount_decrease(&helper->ref);
+				/* The table holds the init reference, removing the entry destroys the mountpoint */
+				g_hash_table_remove(mountpoints,
+					string_ids ? (gpointer)live_rtp->id_str : (gpointer)&live_rtp->id);
 				janus_mutex_unlock(&mountpoints_mutex);
-				janus_streaming_mountpoint_destroy(live_rtp);
 				return NULL;
 			}
 			janus_refcount_increase(&helper->ref);
@@ -7239,8 +7241,14 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
 		JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to launch the RTP thread...\n",
 			error->code, error->message ? error->message : "??");
 		g_error_free(error);
+		/* The mountpoint was published when we released the lock, so a concurrent
+		 * destroy may already have removed it: only remove the entry if it's still ours */
+		janus_mutex_lock(&mountpoints_mutex);
+		gpointer key = string_ids ? (gpointer)live_rtp->id_str : (gpointer)&live_rtp->id;
+		if(g_hash_table_lookup(mountpoints, key) == live_rtp)
+			g_hash_table_remove(mountpoints, key);
+		janus_mutex_unlock(&mountpoints_mutex);
 		janus_refcount_decrease(&live_rtp->ref);	/* This is for the failed thread */
-		janus_streaming_mountpoint_destroy(live_rtp);
 		return NULL;
 	}
 	return live_rtp;
@@ -7360,8 +7368,13 @@ janus_streaming_mountpoint *janus_streaming_create_file_source(
 			JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to launch the live filesource thread...\n",
 				error->code, error->message ? error->message : "??");
 			g_error_free(error);
+			/* As for RTP: the table holds the init reference, and a concurrent destroy may have beaten us */
+			janus_mutex_lock(&mountpoints_mutex);
+			gpointer key = string_ids ? (gpointer)file_source->id_str : (gpointer)&file_source->id;
+			if(g_hash_table_lookup(mountpoints, key) == file_source)
+				g_hash_table_remove(mountpoints, key);
+			janus_mutex_unlock(&mountpoints_mutex);
 			janus_refcount_decrease(&file_source->ref);		/* This is for the failed thread */
-			janus_refcount_decrease(&file_source->ref);
 			return NULL;
 		}
 	}
@@ -8342,14 +8355,15 @@ janus_streaming_mountpoint *janus_streaming_create_rtsp_source(
 					error->code, error->message ? error->message : "??");
 				g_error_free(error);
 				janus_refcount_decrease(&live_rtsp->ref);	/* This is for the helper thread */
-				g_async_queue_unref(helper->queued_packets);
+				/* janus_streaming_helper_free unrefs the queue */
 				janus_refcount_decrease(&helper->ref);
 				/* This extra unref is for the init */
 				janus_refcount_decrease(&helper->ref);
 				janus_mutex_lock(&mountpoints_mutex);
 				g_hash_table_remove(mountpoints_temp, &id);
 				janus_mutex_unlock(&mountpoints_mutex);
-				janus_refcount_decrease(&live_rtsp->ref);
+				/* Stops the helper threads already spawned and drops the init reference */
+				janus_streaming_mountpoint_destroy(live_rtsp);
 				return NULL;
 			}
 			janus_refcount_increase(&helper->ref);
@@ -8368,7 +8382,8 @@ janus_streaming_mountpoint *janus_streaming_create_rtsp_source(
 		g_hash_table_remove(mountpoints_temp, &id);
 		janus_mutex_unlock(&mountpoints_mutex);
 		janus_refcount_decrease(&live_rtsp->ref);	/* This is for the failed thread */
-		janus_refcount_decrease(&live_rtsp->ref);
+		/* Stops the helper threads, if any, and drops the init reference */
+		janus_streaming_mountpoint_destroy(live_rtsp);
 		return NULL;
 	}
 	janus_mutex_lock(&mountpoints_mutex);
