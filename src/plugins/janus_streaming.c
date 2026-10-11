@@ -1581,6 +1581,11 @@ static void janus_streaming_sync_rtp_context(janus_streaming_session *session, j
 
 	// Sync the context for all other viewers with the first viewer
 	janus_mutex_lock(&first->mutex);
+	// Either session may have had its streams torn down by a hangup while still listed as a viewer
+	if(first->streams_byid == NULL || session->streams_byid == NULL) {
+		janus_mutex_unlock(&first->mutex);
+		return;
+	}
 	GHashTableIter iter;
 	gpointer key, val;
 	g_hash_table_iter_init(&iter, first->streams_byid);
