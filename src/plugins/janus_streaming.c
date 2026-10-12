@@ -8437,7 +8437,6 @@ janus_streaming_mountpoint *janus_streaming_create_rtsp_source(
 		g_hash_table_remove(mountpoints_temp, &id);
 		janus_mutex_unlock(&mountpoints_mutex);
 		janus_refcount_decrease(&live_rtsp->ref);	/* This is for the failed thread */
-		/* Stops the helper threads, if any, and drops the init reference */
 		janus_streaming_mountpoint_destroy(live_rtsp);
 		return NULL;
 	}
