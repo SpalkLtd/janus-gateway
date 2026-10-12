@@ -1581,7 +1581,7 @@ static void janus_streaming_sync_rtp_context(janus_streaming_session *session, j
 
 	// Sync the context for all other viewers with the first viewer
 	janus_mutex_lock(&first->mutex);
-	// Either session may have had its streams torn down by a hangup while still listed as a viewer
+	// A listed viewer can have no streams (a watch whose media matches no mid)
 	if(first->streams_byid == NULL || session->streams_byid == NULL) {
 		janus_mutex_unlock(&first->mutex);
 		return;
@@ -7274,7 +7274,6 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
 					error->code, error->message ? error->message : "??");
 				g_error_free(error);
 				janus_refcount_decrease(&live_rtp->ref);	/* This is for the helper thread */
-				/* janus_streaming_helper_free unrefs the queue */
 				janus_refcount_decrease(&helper->ref);
 				/* This extra unref is for the init */
 				janus_refcount_decrease(&helper->ref);
@@ -7424,7 +7423,8 @@ janus_streaming_mountpoint *janus_streaming_create_file_source(
 			JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to launch the live filesource thread...\n",
 				error->code, error->message ? error->message : "??");
 			g_error_free(error);
-			/* As for RTP: the table holds the init reference, and a concurrent destroy may have beaten us */
+			/* The mountpoint was published when we released the lock, so a concurrent
+			 * destroy may already have removed it: only remove the entry if it's still ours */
 			janus_mutex_lock(&mountpoints_mutex);
 			gpointer key = string_ids ? (gpointer)file_source->id_str : (gpointer)&file_source->id;
 			if(g_hash_table_lookup(mountpoints, key) == file_source)
@@ -8411,7 +8411,6 @@ janus_streaming_mountpoint *janus_streaming_create_rtsp_source(
 					error->code, error->message ? error->message : "??");
 				g_error_free(error);
 				janus_refcount_decrease(&live_rtsp->ref);	/* This is for the helper thread */
-				/* janus_streaming_helper_free unrefs the queue */
 				janus_refcount_decrease(&helper->ref);
 				/* This extra unref is for the init */
 				janus_refcount_decrease(&helper->ref);
