@@ -59,7 +59,9 @@
 # collision = in case of collision (more than one SSRC hitting the same port), the plugin
 #		will discard incoming RTP packets with a new SSRC unless this many milliseconds
 #		passed, which would then change the current SSRC (0=disabled)
-# rtp_sync = true|false (whether new viewers inherit current RTP sequence number and timestamp)
+# rtp_sync = true|false (relay the mountpoint's own RTP sequence numbers and timestamps
+#		to every viewer unchanged, so all subscriptions to the mountpoint carry identical
+#		headers; not supported with bufferkf_*, switch or pause/start continuity)
 # dataport = local port for receiving data messages to relay
 # dataiface = network interface or IP address to bind to, if any (binds to all otherwise)
 # datatype = text|binary (type of data this mountpoint will relay, default=text)
