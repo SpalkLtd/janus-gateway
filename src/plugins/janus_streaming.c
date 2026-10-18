@@ -107,7 +107,8 @@ videosvc = true|false (whether the video will have SVC support; works only for V
 collision = in case of collision (more than one SSRC hitting the same port), the plugin
 	will discard incoming RTP packets with a new SSRC unless this many milliseconds
 	passed, which would then change the current SSRC (0=disabled)
-rtp_sync = true|false (whether new viewers inherit current RTP sequence number and timestamp)
+rtp_sync = true|false (whether all viewers of the mountpoint relay the same RTP
+	sequence numbers and timestamps; see below for the limits, default=false)
 dataport = local port for receiving data messages to relay
 datamcast = multicast group for receiving data messages, if any
 dataiface = network interface or IP address to bind to, if any (binds to all otherwise)
@@ -117,6 +118,22 @@ databuffermsg = true|false (whether the plugin should store the latest
 threads = number of threads to assist with the relaying part, which can help
 	if you expect a lot of viewers that may cause the RTP receiving part
 	in the Streaming plugin to slow down and fail to catch up (default=0)
+
+With 'rtp_sync', every viewer rewrites the same incoming packet to the same
+sequence number and timestamp, so a client that subscribes to the mountpoint
+more than once (e.g., over two network paths) can match the packets up. A
+viewer is aligned when it relays its first packet of a stream, by copying the
+rewriting base of a viewer that is already aligned; the first viewer to relay
+a packet sets the base for everyone, and viewers that never start are never
+used as a base. The alignment has limits: a 'pause' followed by a 'start'
+re-bases that viewer's sequence numbers to hide the gap, as it always did, so
+that viewer leaves the shared numbering (its timestamps stay aligned); a
+'switch' re-bases the switching viewer at the target mountpoint in the same
+way; in both cases that viewer is still a candidate base for later viewers.
+Simulcast and SVC streams are not aligned, as each viewer drops different
+packets. With 'videobufferkf', a new viewer rewrites the buffered keyframe
+before it is aligned, so its live packets then jump to the shared numbering.
+Mountpoints with helper 'threads' do not align viewers.
 
 In case you want to use SRTP for your RTP-based mountpoint, you'll need
 to configure the SRTP-related properties as well, namely the suite to
@@ -1257,6 +1274,8 @@ typedef struct janus_streaming_rtp_relay_packet {
 	gboolean is_data;
 	gboolean is_video;
 	gboolean is_keyframe;
+	/* rtp_sync: mountpoint whose viewers must rewrite this packet alike (NULL = don't align) */
+	struct janus_streaming_mountpoint *sync_mp;
 	gboolean simulcast;
 	uint32_t ssrc[3];
 	janus_videocodec codec;
@@ -1509,6 +1528,7 @@ typedef struct janus_streaming_session_stream {
 	gboolean send;			/* Whether this stream media must be sent to this subscriber */
 	int pt;
 	janus_rtp_switching_context context;
+	gboolean rtp_synced;	/* rtp_sync: whether the context is aligned with the mountpoint's other viewers */
 	janus_rtp_simulcasting_context sim_context;
 	janus_vp8_simulcast_context vp8_context;
 	/* The following are only relevant the mountpoint is VP9-SVC, and are not to be confused with VP8
@@ -1562,36 +1582,40 @@ static void janus_streaming_session_free(const janus_refcount *session_ref) {
 	g_free(session);
 }
 
-static void janus_streaming_sync_rtp_context(janus_streaming_session *session, janus_streaming_mountpoint *mp) {
-	if (session == NULL || mp == NULL || mp->viewers == NULL || mp->streaming_source != janus_streaming_source_rtp) {
-		return;
+/* rtp_sync: align a viewer stream's switching context with the other viewers of the
+ * mountpoint, so that all of them rewrite the same incoming packet to the same sequence
+ * number and timestamp. Called by the relay thread, with the mountpoint mutex held, right
+ * before the viewer rewrites its first packet of the stream: if another viewer of the same
+ * mountpoint stream is already aligned we take its base, otherwise this viewer becomes the
+ * base for the others and janus_rtp_header_update initialises its context as usual.
+ * The SSRC relayed to viewers is constant (the mountpoint id), so the rewritten sequence
+ * number and timestamp are a pure function of the packet and of last_ssrc, base_seq,
+ * base_seq_prev, base_ts and base_ts_prev with no reset pending, and those are the only
+ * fields we copy: the result is the same whether or not the reference viewer has already
+ * handled the current packet in this relay pass. last_seq, last_ts and last_time are
+ * recomputed by janus_rtp_header_update on every packet and only feed a later re-base
+ * of this viewer, so they stay its own. */
+static void janus_streaming_sync_rtp_context(janus_streaming_mountpoint *mp,
+		janus_streaming_session *session, janus_streaming_session_stream *s, int mindex) {
+	GList *l = mp->viewers;
+	while(l) {
+		janus_streaming_session *viewer = (janus_streaming_session *)l->data;
+		l = l->next;
+		if(viewer == NULL || viewer == session)
+			continue;
+		janus_streaming_session_stream *ref = g_hash_table_lookup(viewer->streams_byid, GINT_TO_POINTER(mindex));
+		if(ref == NULL || !ref->rtp_synced)
+			continue;
+		s->context.last_ssrc = ref->context.last_ssrc;
+		s->context.base_seq = ref->context.base_seq;
+		s->context.base_seq_prev = ref->context.base_seq_prev;
+		s->context.base_ts = ref->context.base_ts;
+		s->context.base_ts_prev = ref->context.base_ts_prev;
+		s->context.ts_reset = FALSE;
+		s->context.seq_reset = FALSE;
+		break;
 	}
-
-	// Check if RTP sync is enabled
-	janus_streaming_rtp_source *source = mp->source;
-	if(!source->rtp_sync) {
-		return;
-	}
-
-	// Ignore the first viewer, it's the reference
-	janus_streaming_session *first = (janus_streaming_session *)mp->viewers->data;
-	if(first == NULL || first == session) {
-		return;
-	}
-
-	// Sync the context for all other viewers with the first viewer
-	janus_mutex_lock(&first->mutex);
-	GHashTableIter iter;
-	gpointer key, val;
-	g_hash_table_iter_init(&iter, first->streams_byid);
-	while(g_hash_table_iter_next(&iter, &key, &val)) {
-		janus_streaming_session_stream *sa = g_hash_table_lookup(session->streams_byid, key);
-		janus_streaming_session_stream *sb = val;
-		if(sa) {
-			sa->context = sb->context;
-		}
-	}
-	janus_mutex_unlock(&first->mutex);
+	s->rtp_synced = TRUE;
 }
 
 static void janus_streaming_mountpoint_destroy(janus_streaming_mountpoint *mountpoint) {
@@ -6143,7 +6167,6 @@ done:
 			json_object_set_new(result, "status", json_string(do_restart ? "updating" : "preparing"));
 			/* Add the user to the list of watchers and we're done */
 			if(g_list_find(mp->viewers, session) == NULL) {
-				janus_streaming_sync_rtp_context(session, mp);
 				mp->viewers = g_list_append(mp->viewers, session);
 				if(mp->streaming_source == janus_streaming_source_rtp) {
 					/* If we're using helper threads, add the viewer to one of those */
@@ -6486,7 +6509,6 @@ done:
 			janus_mutex_lock(&mp->mutex);
 			janus_mutex_lock(&session->mutex);
 			janus_refcount_increase(&mp->ref);
-			janus_streaming_sync_rtp_context(session, mp);
 			mp->viewers = g_list_append(mp->viewers, session);
 			/* If we're using helper threads, add the viewer to one of those */
 			if(mp->helper_threads > 0) {
@@ -8537,6 +8559,7 @@ static void *janus_streaming_ondemand_thread(void *data) {
 		packet.is_rtp = TRUE;
 		packet.is_video = FALSE;
 		packet.is_keyframe = FALSE;
+		packet.sync_mp = NULL;
 		/* Backup the actual payload type, timestamp and sequence number */
 		packet.ptype = packet.data->type;
 		packet.timestamp = ntohl(packet.data->timestamp);
@@ -8688,6 +8711,7 @@ static void *janus_streaming_filesource_thread(void *data) {
 		packet.is_rtp = TRUE;
 		packet.is_video = FALSE;
 		packet.is_keyframe = FALSE;
+		packet.sync_mp = NULL;
 		/* Backup the actual payload type, timestamp and sequence number */
 		packet.ptype = packet.data->type;
 		packet.timestamp = ntohl(packet.data->timestamp);
@@ -9041,6 +9065,9 @@ static void *janus_streaming_relay_thread(void *data) {
 					packet.is_rtp = TRUE;
 					packet.is_video = FALSE;
 					packet.is_keyframe = FALSE;
+					/* rtp_sync: viewers align their contexts on this thread only, under the
+					 * mountpoint mutex taken below; helper threads relay viewers elsewhere */
+					packet.sync_mp = (source->rtp_sync && mountpoint->helper_threads == 0) ? mountpoint : NULL;
 					packet.data->type = stream->codecs.pt;
 					/* Is there a recorder? */
 					janus_rtp_header_update(packet.data, &stream->context[0], FALSE, 0);
@@ -9232,6 +9259,8 @@ static void *janus_streaming_relay_thread(void *data) {
 					packet.is_rtp = TRUE;
 					packet.is_video = TRUE;
 					packet.is_keyframe = FALSE;
+					/* rtp_sync: see the audio path above */
+					packet.sync_mp = (source->rtp_sync && mountpoint->helper_threads == 0) ? mountpoint : NULL;
 					packet.simulcast = stream->simulcast;
 					packet.substream = index;
 					packet.codec = stream->codecs.video_codec;
@@ -9711,6 +9740,8 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) 
 				}
 			} else {
 				/* Fix sequence number and timestamp (switching may be involved) */
+				if(packet->sync_mp != NULL && !s->rtp_synced)
+					janus_streaming_sync_rtp_context(packet->sync_mp, session, s, packet->mindex);
 				janus_rtp_header_update(packet->data, &s->context, TRUE, 0);
 				if(s->pt > 0)
 					packet->data->type = s->pt;
@@ -9729,6 +9760,8 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) 
 			}
 		} else {
 			/* Fix sequence number and timestamp (switching may be involved) */
+			if(packet->sync_mp != NULL && !s->rtp_synced)
+				janus_streaming_sync_rtp_context(packet->sync_mp, session, s, packet->mindex);
 			janus_rtp_header_update(packet->data, &s->context, FALSE, 0);
 			if(s->pt > 0)
 				packet->data->type = s->pt;

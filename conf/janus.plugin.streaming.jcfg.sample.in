@@ -47,7 +47,11 @@
 # collision = in case of collision (more than one SSRC hitting the same port), the plugin
 #		will discard incoming RTP packets with a new SSRC unless this many milliseconds
 #		passed, which would then change the current SSRC (0=disabled)
-# rtp_sync = true|false (whether new viewers inherit current RTP sequence number and timestamp)
+# rtp_sync = true|false (whether all viewers of the mountpoint relay the same RTP sequence
+#		numbers and timestamps: a viewer copies the rewriting base of an already aligned
+#		viewer when it relays its first packet of a stream; a viewer re-based by pause/start
+#		or switch leaves the shared numbering, simulcast/SVC streams are not aligned, and
+#		mountpoints with helper threads do not align viewers; default=false)
 # dataport = local port for receiving data messages to relay
 # dataiface = network interface or IP address to bind to, if any (binds to all otherwise)
 # datatype = text|binary (type of data this mountpoint will relay, default=text)
