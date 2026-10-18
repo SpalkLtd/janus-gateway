@@ -116,6 +116,10 @@ collision = in case of collision (more than one SSRC hitting the same port), the
 	will discard incoming RTP packets with a new SSRC unless this many milliseconds
 	passed, which would then change the current SSRC (0=disabled)
 rtp_sync = true|false (whether new viewers inherit current RTP sequence number and timestamp)
+rtp_passthrough = true|false (relay the mountpoint's own RTP sequence numbers and timestamps,
+	as rebased once at ingest, to every viewer unchanged, so all viewers of the mountpoint
+	are byte-identical in seq/ts; incompatible with switch, pause/start sequence continuity
+	and bufferkf_*, and has no effect on simulcast or SVC)
 dataport = local port for receiving data messages to relay
 datamcast = multicast group for receiving data messages, if any
 dataiface = network interface or IP address to bind to, if any (binds to all otherwise)
@@ -1122,7 +1126,8 @@ static struct janus_json_parameter rtp_parameters[] = {
 	{"e2ee", JANUS_JSON_BOOL, 0},
 	{"playoutdelay_ext", JANUS_JSON_BOOL, 0},
 	{"abscapturetime_src_ext_id", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
-	{"rtp_sync", JANUS_JSON_BOOL, 0}
+	{"rtp_sync", JANUS_JSON_BOOL, 0},
+	{"rtp_passthrough", JANUS_JSON_BOOL, 0}
 };
 static struct janus_json_parameter live_parameters[] = {
 	{"filename", JSON_STRING, JANUS_JSON_PARAM_REQUIRED},
@@ -1348,6 +1353,7 @@ typedef struct janus_streaming_rtp_relay_packet {
 	gboolean is_data;
 	gboolean is_video;
 	gboolean is_kfburst;
+	gboolean rtp_passthrough;	/* Relay the mountpoint's seq/ts unchanged, skipping the per-viewer rewrite */
 	gboolean simulcast;
 	uint32_t ssrc[3];
 	janus_videocodec codec;
@@ -1392,6 +1398,7 @@ typedef struct janus_streaming_rtp_source {
 	int pipefd[2];				/* Just needed to quickly interrupt the poll when it's time to wrap up */
 	int rtp_collision;			/* Whether we should take care of potential RTP collisions */
 	gboolean rtp_sync;			/* Whether new viewers should inherit RTP seq/timestamp */
+	gboolean rtp_passthrough;	/* Whether viewers get the mountpoint's own seq/ts, unchanged */
 	uint32_t lowest_bitrate;	/* Lowest bitrate received by viewers via REMB since last update */
 	gint64 remb_latest;			/* Time of latest sent REMB (to avoid flooding) */
 	gboolean rtsp;
@@ -1581,7 +1588,7 @@ janus_streaming_rtp_source_stream *janus_streaming_create_rtp_source_stream(
 janus_streaming_mountpoint *janus_streaming_create_rtp_source(
 		uint64_t id, char *id_str, char *name, char *desc, char *metadata,
 		GList *media, int srtpsuite, char *srtpcrypto, int threads, int rtp_collision, gboolean rtp_sync,
-		uint16_t bufferkf_ms, uint32_t bufferkf_bytes,
+		gboolean rtp_passthrough, uint16_t bufferkf_ms, uint32_t bufferkf_bytes,
 		gboolean e2ee, gboolean playoutdelay_ext, int abscapturetime_src_ext_id);
 /* Helper to create a file/ondemand live source */
 janus_streaming_mountpoint *janus_streaming_create_file_source(
@@ -1675,9 +1682,9 @@ static void janus_streaming_sync_rtp_context(janus_streaming_session *session, j
 		return;
 	}
 
-	// Check if RTP sync is enabled
+	// Check if RTP sync is enabled; pointless under passthrough, where viewers never rewrite seq/ts
 	janus_streaming_rtp_source *source = mp->source;
-	if(!source->rtp_sync) {
+	if(!source->rtp_sync || source->rtp_passthrough) {
 		return;
 	}
 
@@ -2265,6 +2272,7 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 				janus_config_item *media = janus_config_get(config, cat, janus_config_type_array, "media");
 				janus_config_item *rtpcollision = janus_config_get(config, cat, janus_config_type_item, "collision");
 				janus_config_item *rtpsync = janus_config_get(config, cat, janus_config_type_item, "rtp_sync");
+				janus_config_item *rtppassthrough = janus_config_get(config, cat, janus_config_type_item, "rtp_passthrough");
 				janus_config_item *vkf_ms = janus_config_get(config, cat, janus_config_type_item, "bufferkf_ms");
 				janus_config_item *vkf_bytes = janus_config_get(config, cat, janus_config_type_item, "bufferkf_bytes");
 				janus_config_item *threads = janus_config_get(config, cat, janus_config_type_item, "threads");
@@ -2717,6 +2725,7 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 						(threads && threads->value) ? atoi(threads->value) : 0,
 						(rtpcollision && rtpcollision->value) ?  atoi(rtpcollision->value) : 0,
 						(rtpsync && rtpsync->value) ? janus_is_true(rtpsync->value) : FALSE,
+						(rtppassthrough && rtppassthrough->value) ? janus_is_true(rtppassthrough->value) : FALSE,
 						bufferkf_ms, bufferkf_bytes,
 						(e2ee && e2ee->value) ? janus_is_true(e2ee->value) : FALSE,
 						(pd && pd->value) ? janus_is_true(pd->value) : FALSE,
@@ -3473,6 +3482,8 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 				json_object_set_new(ml, "collision", json_integer(source->rtp_collision));
 			if(source->rtp_sync)
 				json_object_set_new(ml, "rtp_sync", json_true());
+			if(source->rtp_passthrough)
+				json_object_set_new(ml, "rtp_passthrough", json_true());
 			if(source->bufferkf_ms > 0) {
 				json_object_set_new(ml, "bufferkf_ms", json_integer(source->bufferkf_ms));
 			}
@@ -3661,6 +3672,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 			json_t *is_private = json_object_get(root, "is_private");
 			json_t *rtpcollision = json_object_get(root, "collision");
 			json_t *rtpsync = json_object_get(root, "rtp_sync");
+			json_t *rtppassthrough = json_object_get(root, "rtp_passthrough");
 			json_t *vkf_ms = json_object_get(root, "bufferkf_ms");
 			json_t *vkf_bytes = json_object_get(root, "bufferkf_bytes");
 			json_t *threads = json_object_get(root, "threads");
@@ -4146,6 +4158,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 					threads ? json_integer_value(threads) : 0,
 					rtpcollision ? json_integer_value(rtpcollision) : 0,
 					rtpsync ? json_is_true(rtpsync) : FALSE,
+					rtppassthrough ? json_is_true(rtppassthrough) : FALSE,
 					bufferkf_ms, bufferkf_bytes,
 					e2ee ? json_is_true(e2ee) : FALSE,
 					pd ? json_is_true(pd) : FALSE,
@@ -4558,6 +4571,8 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 				}
 				if(source->rtp_sync)
 					janus_config_add(config, c, janus_config_item_create("rtp_sync", "true"));
+				if(source->rtp_passthrough)
+					janus_config_add(config, c, janus_config_item_create("rtp_passthrough", "true"));
 				if(source->bufferkf_ms > 0) {
 					g_snprintf(value, BUFSIZ, "%"SCNu16, source->bufferkf_ms);
 					janus_config_add(config, c, janus_config_item_create("bufferkf_ms", value));
@@ -4930,6 +4945,8 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 				}
 				if(source->rtp_sync)
 					janus_config_add(config, c, janus_config_item_create("rtp_sync", "true"));
+				if(source->rtp_passthrough)
+					janus_config_add(config, c, janus_config_item_create("rtp_passthrough", "true"));
 				if(source->bufferkf_ms > 0) {
 					g_snprintf(value, BUFSIZ, "%"SCNu16, source->bufferkf_ms);
 					janus_config_add(config, c, janus_config_item_create("bufferkf_ms", value));
@@ -8022,7 +8039,7 @@ janus_streaming_rtp_source_stream *janus_streaming_create_rtp_source_stream(
 janus_streaming_mountpoint *janus_streaming_create_rtp_source(
 		uint64_t id, char *id_str, char *name, char *desc, char *metadata,
 		GList *media, int srtpsuite, char *srtpcrypto, int threads, int rtp_collision, gboolean rtp_sync,
-		uint16_t bufferkf_ms, uint32_t bufferkf_bytes,
+		gboolean rtp_passthrough, uint16_t bufferkf_ms, uint32_t bufferkf_bytes,
 		gboolean e2ee, gboolean playoutdelay_ext, int abscapturetime_src_ext_id) {
 	char id_num[30];
 	if(!string_ids) {
@@ -8144,6 +8161,7 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
 	janus_mutex_init(&live_rtp_source->rec_mutex);
 	live_rtp_source->rtp_collision = rtp_collision;
 	live_rtp_source->rtp_sync = rtp_sync;
+	live_rtp_source->rtp_passthrough = rtp_passthrough;
 	live_rtp_source->bufferkf_ms = bufferkf_ms;
 	live_rtp_source->bufferkf_bytes = bufferkf_bytes;
 	live_rtp_source->e2ee = e2ee;
@@ -9539,6 +9557,7 @@ static void *janus_streaming_ondemand_thread(void *data) {
 		packet.is_rtp = TRUE;
 		packet.is_video = FALSE;
 		packet.is_kfburst = FALSE;
+		packet.rtp_passthrough = FALSE;
 		/* Backup the actual payload type, timestamp and sequence number */
 		packet.ptype = packet.data->type;
 		packet.timestamp = ntohl(packet.data->timestamp);
@@ -9690,6 +9709,7 @@ static void *janus_streaming_filesource_thread(void *data) {
 		packet.is_rtp = TRUE;
 		packet.is_video = FALSE;
 		packet.is_kfburst = FALSE;
+		packet.rtp_passthrough = FALSE;
 		/* Backup the actual payload type, timestamp and sequence number */
 		packet.ptype = packet.data->type;
 		packet.timestamp = ntohl(packet.data->timestamp);
@@ -10149,6 +10169,7 @@ static void *janus_streaming_relay_thread(void *data) {
 					packet.is_rtp = TRUE;
 					packet.is_video = FALSE;
 					packet.is_kfburst = FALSE;
+					packet.rtp_passthrough = source->rtp_passthrough;
 					packet.data->type = stream->codecs.pt;
 					/* Is there a recorder? */
 					janus_rtp_header_update(packet.data, &stream->context[0], FALSE, 0);
@@ -10298,6 +10319,7 @@ static void *janus_streaming_relay_thread(void *data) {
 					packet.is_rtp = TRUE;
 					packet.is_video = TRUE;
 					packet.is_kfburst = FALSE;
+					packet.rtp_passthrough = source->rtp_passthrough;
 					packet.simulcast = stream->simulcast;
 					packet.substream = index;
 					packet.codec = stream->codecs.video_codec;
@@ -10352,6 +10374,7 @@ static void *janus_streaming_relay_thread(void *data) {
 							spspkt.is_rtp = TRUE;
 							spspkt.is_video = TRUE;
 							spspkt.is_kfburst = FALSE;
+							spspkt.rtp_passthrough = source->rtp_passthrough;
 							spspkt.simulcast = FALSE;
 							spspkt.codec = stream->codecs.video_codec;
 							spspkt.svc = FALSE;
@@ -10417,6 +10440,7 @@ static void *janus_streaming_relay_thread(void *data) {
 					packet.length = bytes;
 					packet.is_rtp = FALSE;
 					packet.is_data = TRUE;
+					packet.rtp_passthrough = source->rtp_passthrough;
 					packet.textdata = stream->textdata;
 					/* Is there a recorder? */
 					janus_recorder_save_frame(stream->rc, data, bytes);
@@ -10834,8 +10858,10 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) 
 					memcpy(payload, vp8pd, sizeof(vp8pd));
 				}
 			} else {
-				/* Fix sequence number and timestamp (switching may be involved) */
-				janus_rtp_header_update(packet->data, &s->context, TRUE, 0);
+				/* Fix sequence number and timestamp (switching may be involved),
+				 * unless the mountpoint relays its own seq/ts to every viewer */
+				if(!packet->rtp_passthrough)
+					janus_rtp_header_update(packet->data, &s->context, TRUE, 0);
 				if(s->pt > 0)
 					packet->data->type = s->pt;
 				janus_plugin_rtp rtp = { .mindex = s->mindex, .video = packet->is_video, .buffer = (char *)packet->data, .length = packet->length };
@@ -10859,8 +10885,10 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) 
 				packet->data->seq_number = htons(packet->seq_number);
 			}
 		} else {
-			/* Fix sequence number and timestamp (switching may be involved) */
-			janus_rtp_header_update(packet->data, &s->context, FALSE, 0);
+			/* Fix sequence number and timestamp (switching may be involved),
+			 * unless the mountpoint relays its own seq/ts to every viewer */
+			if(!packet->rtp_passthrough)
+				janus_rtp_header_update(packet->data, &s->context, FALSE, 0);
 			if(s->pt > 0)
 				packet->data->type = s->pt;
 			janus_plugin_rtp rtp = { .mindex = s->mindex, .video = packet->is_video, .buffer = (char *)packet->data, .length = packet->length };
@@ -10936,6 +10964,7 @@ static void janus_streaming_helper_rtprtcp_packet(gpointer data, gpointer user_d
 	copy->textdata = packet->textdata;
 	copy->is_video = packet->is_video;
 	copy->is_kfburst = packet->is_kfburst;
+	copy->rtp_passthrough = packet->rtp_passthrough;
 	copy->simulcast = packet->simulcast;
 	copy->ssrc[0] = packet->ssrc[0];
 	copy->ssrc[1] = packet->ssrc[1];

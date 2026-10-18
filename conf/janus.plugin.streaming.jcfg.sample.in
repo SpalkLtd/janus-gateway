@@ -60,6 +60,10 @@
 #		will discard incoming RTP packets with a new SSRC unless this many milliseconds
 #		passed, which would then change the current SSRC (0=disabled)
 # rtp_sync = true|false (whether new viewers inherit current RTP sequence number and timestamp)
+# rtp_passthrough = true|false (relay the mountpoint's own RTP sequence numbers and timestamps,
+#		as rebased once at ingest, to every viewer unchanged, so all viewers of the mountpoint
+#		are byte-identical in seq/ts; incompatible with switch, pause/start sequence continuity
+#		and bufferkf_*, and has no effect on simulcast or SVC)
 # dataport = local port for receiving data messages to relay
 # dataiface = network interface or IP address to bind to, if any (binds to all otherwise)
 # datatype = text|binary (type of data this mountpoint will relay, default=text)
