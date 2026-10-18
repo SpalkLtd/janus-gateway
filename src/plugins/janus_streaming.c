@@ -1262,7 +1262,6 @@ typedef struct janus_streaming_rtp_relay_packet {
 	gboolean is_data;
 	gboolean is_video;
 	gboolean is_keyframe;
-	gboolean rtp_passthrough;	/* Relay the mountpoint's seq/ts unchanged, skipping the per-viewer rewrite */
 	gboolean simulcast;
 	uint32_t ssrc[3];
 	janus_videocodec codec;
@@ -1389,6 +1388,7 @@ typedef struct janus_streaming_rtp_source_stream {
 	int rtcp_fd;
 	gboolean simulcast;
 	gboolean svc;
+	gboolean rtp_passthrough;	/* Viewers relay this stream's own seq/ts, skipping the per-viewer rewrite */
 	gboolean skew;
 	gint64 last_received;
 	uint32_t ssrc;				/* Only needed for fixing outgoing RTCP packets */
@@ -7182,6 +7182,21 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
 			live_rtp->video = TRUE;
 		else if(stream->type == JANUS_STREAMING_MEDIA_DATA)
 			live_rtp->data = TRUE;
+		if(rtp_passthrough) {
+			/* Only the plain audio/video relay paths skip the per-viewer rewrite: simulcast and
+			 * SVC need the viewer's context for layer bookkeeping, and a buffered keyframe is
+			 * replayed from before the live packets, so its seq/ts cannot be passed through */
+			if(stream->keyframe.enabled)
+				JANUS_LOG(LOG_WARN, "[%s] rtp_passthrough does not apply to buffered keyframes (bufferkf on stream '%s')\n",
+					live_rtp->name, stream->mid);
+			if(stream->simulcast)
+				JANUS_LOG(LOG_WARN, "[%s] rtp_passthrough does not apply to simulcast (stream '%s')\n",
+					live_rtp->name, stream->mid);
+			if(stream->svc)
+				JANUS_LOG(LOG_WARN, "[%s] rtp_passthrough does not apply to SVC (stream '%s')\n",
+					live_rtp->name, stream->mid);
+		}
+		stream->rtp_passthrough = rtp_passthrough;
 		/* Map this stream by mindex */
 		g_hash_table_insert(live_rtp_source->media_byid, GINT_TO_POINTER(stream->mindex), stream);
 		/* Map this stream by all its file descriptors */
@@ -8557,7 +8572,6 @@ static void *janus_streaming_ondemand_thread(void *data) {
 		packet.is_rtp = TRUE;
 		packet.is_video = FALSE;
 		packet.is_keyframe = FALSE;
-		packet.rtp_passthrough = FALSE;
 		/* Backup the actual payload type, timestamp and sequence number */
 		packet.ptype = packet.data->type;
 		packet.timestamp = ntohl(packet.data->timestamp);
@@ -8709,7 +8723,6 @@ static void *janus_streaming_filesource_thread(void *data) {
 		packet.is_rtp = TRUE;
 		packet.is_video = FALSE;
 		packet.is_keyframe = FALSE;
-		packet.rtp_passthrough = FALSE;
 		/* Backup the actual payload type, timestamp and sequence number */
 		packet.ptype = packet.data->type;
 		packet.timestamp = ntohl(packet.data->timestamp);
@@ -9063,7 +9076,6 @@ static void *janus_streaming_relay_thread(void *data) {
 					packet.is_rtp = TRUE;
 					packet.is_video = FALSE;
 					packet.is_keyframe = FALSE;
-					packet.rtp_passthrough = source->rtp_passthrough;
 					packet.data->type = stream->codecs.pt;
 					/* Is there a recorder? */
 					janus_rtp_header_update(packet.data, &stream->context[0], FALSE, 0);
@@ -9255,7 +9267,6 @@ static void *janus_streaming_relay_thread(void *data) {
 					packet.is_rtp = TRUE;
 					packet.is_video = TRUE;
 					packet.is_keyframe = FALSE;
-					packet.rtp_passthrough = source->rtp_passthrough;
 					packet.simulcast = stream->simulcast;
 					packet.substream = index;
 					packet.codec = stream->codecs.video_codec;
@@ -9336,7 +9347,6 @@ static void *janus_streaming_relay_thread(void *data) {
 					packet.length = bytes;
 					packet.is_rtp = FALSE;
 					packet.is_data = TRUE;
-					packet.rtp_passthrough = source->rtp_passthrough;
 					packet.textdata = stream->textdata;
 					/* Is there a recorder? */
 					janus_recorder_save_frame(stream->rc, data, bytes);
@@ -9735,9 +9745,9 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) 
 					memcpy(payload, vp8pd, sizeof(vp8pd));
 				}
 			} else {
-				/* Fix sequence number and timestamp (switching may be involved),
-				 * unless the mountpoint relays its own seq/ts to every viewer */
-				if(!packet->rtp_passthrough)
+				/* Fix sequence number and timestamp (switching may be involved), unless the
+				 * mountpoint relays its own seq/ts to every viewer (file sources have no source stream) */
+				if(stream == NULL || !stream->rtp_passthrough)
 					janus_rtp_header_update(packet->data, &s->context, TRUE, 0);
 				if(s->pt > 0)
 					packet->data->type = s->pt;
@@ -9755,9 +9765,9 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) 
 				packet->data->seq_number = htons(packet->seq_number);
 			}
 		} else {
-			/* Fix sequence number and timestamp (switching may be involved),
-			 * unless the mountpoint relays its own seq/ts to every viewer */
-			if(!packet->rtp_passthrough)
+			/* Fix sequence number and timestamp (switching may be involved), unless the
+			 * mountpoint relays its own seq/ts to every viewer (file sources have no source stream) */
+			if(stream == NULL || !stream->rtp_passthrough)
 				janus_rtp_header_update(packet->data, &s->context, FALSE, 0);
 			if(s->pt > 0)
 				packet->data->type = s->pt;
@@ -9837,7 +9847,6 @@ static void janus_streaming_helper_rtprtcp_packet(gpointer data, gpointer user_d
 	copy->textdata = packet->textdata;
 	copy->is_video = packet->is_video;
 	copy->is_keyframe = packet->is_keyframe;
-	copy->rtp_passthrough = packet->rtp_passthrough;
 	copy->simulcast = packet->simulcast;
 	copy->ssrc[0] = packet->ssrc[0];
 	copy->ssrc[1] = packet->ssrc[1];
